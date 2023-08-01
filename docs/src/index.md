@@ -14,9 +14,10 @@ julia> Pkg.add("ElemCo")
 
 ## Usage
 
-### Computing density-fitted Hartree-Fock
+### Computing density-fitted Hartree-Fock and Coupled Cluster methods
 
-To compute density-fitted Hartree-Fock (DF-HF) using ElemCo.jl, you can use the `@dfhf` macro. Here's an example of how you can use this macro:
+To compute density-fitted Hartree-Fock (DF-HF) using ElemCo.jl, you can use the [`@dfhf`](@ref) macro. In order to run post-HF calculations, the integrals have to be transformed to the MO basis (using the [`@dfints`](@ref) macro), and
+the coupled cluster calculations can be performed using [`@cc`](@ref) macro. Here's an example of how you can use these macros:
 
 ```julia
 using ElemCo
@@ -34,9 +35,13 @@ basis = Dict("ao"=>"cc-pVDZ",
 
 # Compute DF-HF 
 @dfhf
+# Calculate MO integrals 
+@dfints
+# Run CCSD(T) calculation
+@cc ccsd(t)
 ```
 
-This code defines a water molecule, computes DF-HF using the cc-pVDZ basis set, and prints the resulting energy.
+This code defines a water molecule, computes DF-HF using the cc-pVDZ basis set, calculates integrals using density fitting (mp2fit basis) and computes CCSD(T) energy.
 
 ### Setting options
 
