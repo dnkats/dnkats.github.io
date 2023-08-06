@@ -1,6 +1,8 @@
 push!(LOAD_PATH,"../src/")
 using Documenter, ElemCo
 
+DocMeta.setdocmeta!(ElemCo, :DocTestSetup, :(using ElemCo); recursive=true)
+
 makedocs(
   modules = [ElemCo],
   format = Documenter.HTML(
