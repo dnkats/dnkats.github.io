@@ -10,4 +10,5 @@ makedocs(
     prettyurls = !("local" in ARGS),
     assets = ["assets/favicon.ico"],
   ),
-  sitename="ElemCo.jl documentation")
+  sitename="ElemCo.jl documentation",
+  checkdocs=:exports)

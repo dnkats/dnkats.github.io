@@ -51,6 +51,10 @@ The basis set dictionary contains three keys: `ao`, `jkfit`, and
 `jkfit` key contains the basis set for the density fitting integrals in the Hartree-Fock calculations,
 and the `mp2fit` key contains the fitting basis set for the correlated calculations.
 
+```@docs
+ElemCo.MSystem
+```
+
 ## Exported functions and types
 
 ```@docs
@@ -64,4 +68,5 @@ ElemCo.bond_length
 ElemCo.electron_distribution
 ElemCo.guess_nelec
 ElemCo.guess_norb
+ElemCo.generate_basis
 ```

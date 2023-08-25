@@ -1,5 +1,9 @@
 # Coupled-cluster methods
 
+```@docs
+ElemCo.CoupledCluster
+```
+
 ## Exported functions
   
 ```@docs

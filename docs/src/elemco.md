@@ -4,10 +4,12 @@
 
 ```@docs
 @ECsetup
+@tryECsetup
 @opt
 @dfhf
 @dfints
 @cc
+@run
 ```
 
 ## Exported functions
