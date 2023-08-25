@@ -29,13 +29,4 @@ basis set, and calculates the DF-HF energy.
   
 ```@docs
 ElemCo.dfhf
-ElemCo.GuessType
 ``` 
-
-## Some internal functions
-
-```@docs
-ElemCo.DFHF.dffock
-ElemCo.DFHF.generate_basis
-ElemCo.DFHF.generate_integrals
-```
