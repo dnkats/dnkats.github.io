@@ -25,6 +25,3 @@ ElemCo.uppertriangular
 ElemCo.uppertriangular_range
 ```
 
-```@docs
-ElemCo.SpinCase
-```
