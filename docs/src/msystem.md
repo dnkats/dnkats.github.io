@@ -68,5 +68,10 @@ ElemCo.bond_length
 ElemCo.electron_distribution
 ElemCo.guess_nelec
 ElemCo.guess_norb
+ElemCo.guess_ncore
 ElemCo.generate_basis
+```
+## Internal functions and types
+```@docs
+ElemCo.MSystem.ncoreorbs
 ```

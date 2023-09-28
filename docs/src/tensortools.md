@@ -7,7 +7,7 @@ ElemCo.TensorTools
 ## I/O functions
 
 ```@docs
-ElemCo.save
+ElemCo.save!
 ElemCo.load
 ElemCo.mmap
 ElemCo.newmmap
