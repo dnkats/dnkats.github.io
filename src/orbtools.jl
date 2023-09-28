@@ -6,7 +6,7 @@ using ..ElemCo.ECInts
 using ..ElemCo.MSystem
 using ..ElemCo.TensorTools
 
-export guess_orb
+export guess_orb, load_orbitals, orbital_energies
 
 """
     guess_hcore(EC::ECInfo)
@@ -54,7 +54,7 @@ end
   - :HCORE from core Hamiltonian
   - :SAD from atomic densities
   - :GWH not implemented yet
-  - :ORB from previous orbitals stored in file `EC.options.scf.orbsguess`
+  - :ORB from previous orbitals stored in file `EC.options.wf.orb`
 """
 function guess_orb(EC::ECInfo, guess::Symbol)
   if guess == :HCORE || guess == :hcore
@@ -64,10 +64,48 @@ function guess_orb(EC::ECInfo, guess::Symbol)
   elseif guess == :GWH || guess == :gwh
     return guess_gwh(EC)
   elseif guess == :ORB || guess == :orb
-    return load(EC,EC.options.scf.orbsguess)
+    return load(EC,EC.options.wf.orb)
   else
     error("unknown guess type")
   end
+end
+
+"""
+    load_orbitals(EC::ECInfo, orbsfile::String="")
+
+  Load (last) orbitals.
+  
+  - from file `orbsfile` if not empty
+  - from file `EC.options.wf.orb` if not empty
+  - error if all files are empty
+"""
+function load_orbitals(EC::ECInfo, orbsfile::String="")
+  if !isempty(strip(orbsfile))
+    # orbsfile will be used
+  elseif !isempty(strip(EC.options.wf.orb))
+    orbsfile = EC.options.wf.orb
+  else
+    error("no orbitals found")
+  end
+  return load(EC, orbsfile)
+end
+
+"""
+    orbital_energies(EC::ECInfo, spincase::Symbol=:α)
+
+  Return orbital energies for a given `spincase`∈{`:α`,`:β`}.
+"""
+function orbital_energies(EC::ECInfo, spincase::Symbol=:α)
+  if spincase == :α
+    eps = load(EC, "e_m")
+    ϵo = eps[EC.space['o']]
+    ϵv = eps[EC.space['v']]
+  else
+    eps = load(EC, "e_M")
+    ϵo = eps[EC.space['O']]
+    ϵv = eps[EC.space['V']]
+  end
+  return ϵo, ϵv
 end
 
 

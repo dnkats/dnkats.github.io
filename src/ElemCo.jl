@@ -1,9 +1,8 @@
-#!/usr/bin/env julia
-
 """
-ELEctronic Methods of COrrelation 
+       ╭─────────────╮
+Electron Correlation methods
+       ╰─────────────╯
 """
-
 module ElemCo
 
 include("abstractEC.jl")
@@ -21,6 +20,8 @@ include("fockfactory.jl")
 include("diis.jl")
 include("orbtools.jl")
 include("dftools.jl")
+include("decomptools.jl")
+include("cctools.jl")
 include("dfcc.jl")
 include("cc.jl")
 
@@ -37,14 +38,15 @@ catch
   println("MKL package not found, using OpenBLAS.")
 end
 using LinearAlgebra
+using Printf
 #BLAS.set_num_threads(1)
-using ArgParse
 using .Utils
 using .ECInfos
 using .ECMethods
 using .TensorTools
 using .FockFactory
 using .CoupledCluster
+using .DFCoupledCluster
 using .FciDump
 using .MSystem
 using .BOHF
@@ -54,42 +56,107 @@ using .DfDump
 
 
 export ECdriver 
-export @ECsetup, @tryECsetup, @opt, @run, @dfhf, @dfints, @cc
+export @loadfile, @savefile, @copyfile
+export @ECinit, @tryECinit, @opt, @run, @dfhf, @dfints, @cc, @svdcc
+
+"""
+    @loadfile(filename)
+
+  Load file `filename` in `EC.scr` directory.
+
+  # Example
+```julia
+fock = @loadfile("f_mm")
+orbs = @loadfile("C_Am")
+```
+"""
+macro loadfile(filename)
+  return quote
+    load($(esc(:EC)), $(esc(filename)))
+  end
+end
+
+"""
+    @savefile(filename, arr, kwargs...)
+
+  Save array or tuple of arrays `arr` to file `filename` in `EC.scr` directory.
+
+  # Keyword arguments
+  - `description::String`: description of the file (default: "tmp").
+  - `overwrite::Bool`: overwrite existing file (default: `false`).
+"""
+macro savefile(filename, arr, kwargs...)
+  ekwa = [esc(a) for a in kwargs]
+  return quote
+    save!($(esc(:EC)), $(esc(filename)), $(esc(arr)); $(ekwa...))
+  end
+end
+
+"""
+    @copyfile(from_file, to_file, kwargs...)
+
+  Copy file `from_file` to `to_file` in `EC.scr` directory.
+
+  # Keyword arguments
+  - `overwrite::Bool`: overwrite existing file (default: `false`).
+"""
+macro copyfile(from_file, to_file, kwargs...)
+  ekwa = [esc(a) for a in kwargs]
+  return quote
+    copy_file!($(esc(:EC)), $(esc(from_file)), $(esc(to_file)); $(ekwa...))
+  end
+end
 
 """ 
-    @ECsetup()
+    @ECinit()
 
-  Setup `EC::ECInfo` from variables `geometry::String` and `basis::Dict{String,Any}`.
+  Initialize `EC::ECInfo` and add molecular system and/or fcidump 
+  if variables `geometry::String` and `basis::Dict{String,Any}`
+  and/or `fcidump::String` are defined.
+
+  If `EC` is already initialized, it will be overwritten.
 
   # Examples
-```jldoctest
+```julia
 geometry="\nHe 0.0 0.0 0.0"
 basis = Dict("ao"=>"cc-pVDZ", "jkfit"=>"cc-pvtz-jkfit", "mp2fit"=>"cc-pvdz-rifit")
-@ECsetup
+@ECinit
 # output
 Occupied orbitals:[1]
 
 ```
 """
-macro ECsetup()
+macro ECinit()
   return quote
-    global $(esc(:EC)) = ECInfo(ms=MSys($(esc(:geometry)),$(esc(:basis))))
-    setup!($(esc(:EC)))
+    $(esc(:EC)) = ECInfo()
+    try
+      $(esc(:EC)).ms = MSys($(esc(:geometry)),$(esc(:basis)))
+    catch err
+      isa(err, UndefVarError) || rethrow(err)
+    end
+    try
+      $(esc(:EC)).fd = read_fcidump($(esc(:fcidump)))
+    catch err
+      isa(err, UndefVarError) || rethrow(err)
+    end
   end
 end
 
 """ 
-    @tryECsetup()
+    @tryECinit()
 
-  Setup `EC::ECInfo` from `geometry::String` and `basis::Dict{String,Any}` 
-  if not already done.
+  If `EC::ECInfo` is not yet initialized, run [`@ECinit`](@ref) macro.
 """
-macro tryECsetup()
+macro tryECinit()
   return quote
+    runECinit = [false]
     try
       $(esc(:EC)).ignore_error
     catch
-      $(esc(:@ECsetup))
+      runECinit[1] = true
+    end
+    if runECinit[1]
+      $(esc(:@ECinit))
     end
   end
 end
@@ -99,7 +166,11 @@ end
 
   Set options for `EC::ECInfo`. 
     
-  If `EC` is not already setup, it will be done. 
+  The first argument `what` is the name of the option (e.g., `scf`, `cc`, `cholesky`).
+  The keyword arguments are the options to be set (e.g., `thr=1.e-14`, `maxit=10`).
+  The current state of the options can be stored in a variable, e.g., `opt_cc = EC.options`. 
+  If `EC` is not already initialized, it will be done. 
+
 
   # Examples
 ```julia
@@ -111,7 +182,7 @@ macro opt(what, kwargs...)
   strwhat="$what"
   ekwa = [esc(a) for a in kwargs]
   return quote
-    $(esc(:@tryECsetup))
+    $(esc(:@tryECinit))
     if hasproperty($(esc(:EC)).options, Symbol($(esc(strwhat))))
       set_options!($(esc(:EC)).options.$what; $(ekwa...))
     else
@@ -124,7 +195,7 @@ end
 macro run(method, kwargs...)
   ekwa = [esc(a) for a in kwargs]
   return quote
-    $(esc(:@tryECsetup))
+    $(esc(:@tryECinit))
     $method($(esc(:EC)); $(ekwa...))
   end
 end
@@ -132,33 +203,26 @@ end
 """ 
     @dfhf()
 
-  Run DFHF calculation and return MO coefficients (`ORBS`) and orbital energies (`EPS`).
+  Run DFHF calculation. The orbitals are stored to `ScfOptions.save`.
 """
 macro dfhf()
   return quote
-    $(esc(:@tryECsetup))
-    $(esc(:EPS)), $(esc(:ORBS)) = dfhf($(esc(:EC)))
+    $(esc(:@tryECinit))
+    dfhf($(esc(:EC)))
   end
 end
 
 """
-    @dfints(orbs = nothing, fcidump = "")
+    @dfints()
 
   Generate 2 and 4-idx MO integrals using density fitting.
-
-  If `orbs::Matrix` is given, the orbitals are used to generate the integrals, 
-  otherwise the last orbitals (`ORBS`) are used.
-  If `fcidump::String` is given, the integrals are written to the fcidump file.
+  The MO coefficients are read from `IntOptions.orbs`,
+  and if empty string - from `ScfOptions.save`.
 """
-macro dfints(orbs = nothing, fcidump = "")
+macro dfints()
   return quote
-    $(esc(:@tryECsetup))
-    if isnothing($orbs)
-      orbitals = $(esc(:ORBS))
-    else
-      orbitals = $orbs
-    end
-    dfdump($(esc(:EC)),orbitals, $fcidump)
+    $(esc(:@tryECinit))
+    dfdump($(esc(:EC)))
   end
 end
 
@@ -187,128 +251,58 @@ basis = Dict("ao"=>"cc-pVDZ", "jkfit"=>"cc-pvtz-jkfit", "mp2fit"=>"cc-pvdz-rifit
 ```
 """
 macro cc(method, kwargs...)
-  strmethod="$method"
+  strmethod=replace("$method", " " => "")
   ekwa = [esc(a) for a in kwargs]
-  fcidump_given = false
-  for a in ekwa
-    if a.args[1].args[1] == :fcidump
-      fcidump_given = true
-    end
-  end
-  if fcidump_given
+  if kwarg_provided_in_macro(kwargs, :fcidump)
     return quote
+      $(esc(:@tryECinit))
       ECdriver($(esc(:EC)), $(esc(strmethod)); $(ekwa...))
     end
   else
     return quote
+      $(esc(:@tryECinit))
       ECdriver($(esc(:EC)), $(esc(strmethod)); fcidump="", $(ekwa...))
     end
   end
 end
 
-""" 
-    parse_commandline(EC::ECInfo)
-
-Parse command line arguments. 
 """
-function parse_commandline(EC::ECInfo)
-  s = ArgParseSettings()
-  @add_arg_table! s begin
-    "--method", "-m"
-      help = "method or list of methods to calculate"
-      arg_type = String
-      default = "dcsd"
-    "--scratch", "-s"
-      help = "scratch directory"
-      arg_type = String
-      default = "elemcojlscr"
-    "--verbosity", "-v"
-      help = "verbosity"
-      arg_type = Int
-      default = 2
-    "--output", "-o"
-      help = "output file"
-      arg_type = String
-      default = ""
-    "--occa"
-      help = "occupied α orbitals (in '1-3+5' format)"
-      arg_type = String
-      default = "-"
-    "--occb"
-      help = "occupied β orbitals (in '1-3+6' format)"
-      arg_type = String
-      default = "-"
-    "--force", "-f"
-      help = "supress some of the error messages (ignore_error)"
-      action = :store_true
-    "--choltol", "-c"
-      help = "cholesky threshold"
-      arg_type = Float64
-      default = 1.e-6
-    "--amptol", "-a"
-      help = "amplitude threshold"
-      arg_type = Float64
-      default = 1.e-3
-    "--save_t3"
-      help = "save (T) for decomposition"
-      action = :store_true
-    "arg1"
-      help = "input file (currently fcidump file)"
-      default = "FCIDUMP"
-    "--test", "-t"
-      action = :store_true
+    @svdcc(method="dcsd")
 
+  Run coupled cluster calculation with SVD decomposition of the amplitudes.
+
+  The type of the method is determined by the first argument (dcsd/dcd)
+  
+  # Examples
+```julia
+geometry="bohr
+O      0.000000000    0.000000000   -0.130186067
+H1     0.000000000    1.489124508    1.033245507
+H2     0.000000000   -1.489124508    1.033245507"
+basis = Dict("ao"=>"cc-pVDZ", "jkfit"=>"cc-pvtz-jkfit", "mp2fit"=>"cc-pvdz-rifit")
+@dfhf
+@svdcc
+```
+"""
+macro svdcc(method="dcsd")
+  strmethod=replace("$method", " " => "")
+  return quote
+    calc_svd_dc($(esc(:EC)), $(esc(strmethod)))
   end
-  args = parse_args(s)
-  EC.scr = args["scratch"]
-  EC.verbosity = args["verbosity"]
-  EC.out = args["output"]
-  EC.ignore_error = args["force"]
-  EC.options.cholesky.thr = args["choltol"]
-  EC.options.cc.ampsvdtol = args["amptol"]
-  EC.options.cc.calc_t3_for_decomposition = args["save_t3"]
-  fcidump_file = args["arg1"]
-  method = args["method"]
-  occa = args["occa"]
-  occb = args["occb"]
-  test = args["test"]
-  if test
-    include(joinpath(@__DIR__,"..","test","runtests.jl"))
-    fcidump_file = ""
-  end
-  return fcidump_file, method, occa, occb
 end
 
 function run_mcscf()
-  xyz="bohr
+  geometry="bohr
      O      0.000000000    0.000000000   -0.130186067
      H1     0.000000000    1.489124508    1.033245507
      H2     0.000000000   -1.489124508    1.033245507"
-
 
   basis = Dict("ao"=>"cc-pVDZ",
              "jkfit"=>"cc-pvtz-jkfit",
              "mp2fit"=>"cc-pvdz-rifit")
 
-  EC = ECInfo(ms=MSys(xyz,basis))
-  setup!(EC,ms2=2,charge=-2)
-
+  @opt wf ms2=2 charge=-2
   E,cMO =  dfmcscf(EC,direct=false)
-
-end
-
-function run(method::String="ccsd", dumpfile::String="H2O.FCIDUMP", occa="-", occb="-", use_kext::Bool=true)
-  EC = ECInfo()
-  fcidump = joinpath(@__DIR__,"..","test",dumpfile)
-  EC.options.cc.maxit = 100
-  EC.options.cc.thr = 1.e-12
-  EC.options.cc.use_kext = use_kext
-  EC.options.cc.calc_d_vvvv = !use_kext
-  EC.options.cc.calc_d_vvvo = !use_kext
-  EC.options.cc.calc_d_vovv = !use_kext
-  EC.options.cc.calc_d_vvoo = !use_kext
-  EHF, EMP2, ECCSD = ECdriver(EC,method; fcidump, occa, occb)
-  return ECCSD
 end
 
 """
@@ -336,23 +330,23 @@ function calc_fock_matrix(EC::ECInfo, closed_shell)
   t1 = time_ns()
   if closed_shell
     fock = gen_fock(EC)
-    save(EC, "f_mm", fock)
-    save(EC, "f_MM", fock)
+    save!(EC, "f_mm", fock)
+    save!(EC, "f_MM", fock)
     eps = diag(fock)
     println("Occupied orbital energies: ", eps[EC.space['o']])
-    save(EC, "e_m", eps)
-    save(EC, "e_M", eps)
+    save!(EC, "e_m", eps)
+    save!(EC, "e_M", eps)
   else
     fock = gen_fock(EC, :α)
     eps = diag(fock)
-    println("Occupied \alpha orbital energies: ", eps[EC.space['o']])
-    save(EC, "f_mm", fock)
-    save(EC, "e_m", eps)
+    println("Occupied α orbital energies: ", eps[EC.space['o']])
+    save!(EC, "f_mm", fock)
+    save!(EC, "e_m", eps)
     fock = gen_fock(EC, :β)
     eps = diag(fock)
-    println("Occupied \beta orbital energies: ", eps[EC.space['O']])
-    save(EC,"f_MM", fock)
-    save(EC,"e_M", eps)
+    println("Occupied β orbital energies: ", eps[EC.space['O']])
+    save!(EC,"f_MM", fock)
+    save!(EC,"e_M", eps)
   end
   t1 = print_time(EC,t1,"fock matrix",1)
 end
@@ -389,7 +383,19 @@ end
 function ECdriver(EC::ECInfo, methods; fcidump="FCIDUMP", occa="-", occb="-")
   t1 = time_ns()
   method_names = split(methods)
-  setup!(EC;fcidump,occa,occb)
+  if occa != "-"
+    EC.options.wf.occa = occa
+  end
+  if occb != "-"
+    EC.options.wf.occb = occb
+  end
+  if fcidump != ""
+    # read fcidump intergrals
+    EC.fd = read_fcidump(fcidump)
+    t1 = print_time(EC,t1,"read fcidump",1)
+  end
+  setup_space_fd!(EC)
+
   closed_shell, addname = is_closed_shell(EC)
 
   calc_fock_matrix(EC, closed_shell)
@@ -408,110 +414,81 @@ function ECdriver(EC::ECInfo, methods; fcidump="FCIDUMP", occa="-", occb="-")
     else
       add2name = addname
       closed_shell_method = closed_shell
+      ecmethod.unrestricted = !closed_shell
     end
     # at the moment we always calculate MP2 first
     # calculate MP2
     if closed_shell_method
-      EMp2, T2 = calc_MP2(EC)
+      EMp2 = calc_MP2(EC)
     else
-      EMp2, T2a, T2b, T2ab = calc_UMP2(EC)
+      EMp2 = calc_UMP2(EC)
     end
     println(add2name*"MP2 correlation energy: ",EMp2)
     println(add2name*"MP2 total energy: ",EMp2+EHF)
     t1 = print_time(EC,t1,"MP2",1)
     flush(stdout)
-
     if ecmethod.theory == "MP"
       continue
     end
-
-    dc = (ecmethod.theory == "DC")
 
     if ecmethod.exclevel[4] != :none
       error("no quadruples implemented yet...")
     end
 
-    if closed_shell_method
-      if ecmethod.exclevel[1] == :full
-        T1 = zeros(size(SP['v'],1),size(SP['o'],1))
-      else
-        T1 = zeros(0)
-      end
-      ECC, T1, T2 = calc_cc(EC, T1, T2, dc)
-    else
-      if ecmethod.exclevel[1] == :full
-        T1a = zeros(size(SP['v'],1),size(SP['o'],1))
-        T1b = zeros(size(SP['V'],1),size(SP['O'],1))
-        if(!EC.options.cc.use_kext)
-          error("open-shell CCSD only implemented with kext")
-        end
-      else
-        T1a = zeros(0)
-        T1b = zeros(0)
-      end
-      ECC, T1a, T1b, T2a, T2b, T2ab = calc_cc(EC,T1a,T1b,T2a,T2b,T2ab,dc)
+    ecmethod_save = ecmethod
+    if ecmethod.exclevel[3] in [:full, :pertiter]
+      ecmethod = ECMethod("CCSD")
+      ecmethod.unrestricted = ecmethod_save.unrestricted
     end
+    ECC = calc_cc(EC, ecmethod)
+
+    main_name = method_name(ecmethod)
+    ecmethod = ecmethod_save # restore
 
     if closed_shell_method
-      main_name = method_name(T1,dc)
       if ecmethod.exclevel[3] != :none
         do_full_t3 = (ecmethod.exclevel[3] == :full || ecmethod.exclevel[3] == :pertiter)
         save_pert_t3 = do_full_t3 && EC.options.cc.calc_t3_for_decomposition
-        ET3, ET3b = calc_pertT(EC, T1, T2; save_t3 = save_pert_t3)
+        ET3, ET3b = calc_pertT(EC; save_t3 = save_pert_t3)
         println()
         println("$main_name[T] total energy: ",ECC+ET3b+EHF)
         println("$main_name(T) correlation energy: ",ECC+ET3)
         println("$main_name(T) total energy: ",ECC+ET3+EHF)
         if do_full_t3
           cc3 = (ecmethod.exclevel[3] == :pertiter)
-          ECC, T1, T2 = CoupledCluster.calc_ccsdt(EC, T1, T2, EC.options.cc.calc_t3_for_decomposition, cc3)
-          if cc3
-            main_name = "CC3"
-          else
-            main_name = "DC-CCSDT"
-          end
+          ECC = CoupledCluster.calc_ccsdt(EC, EC.options.cc.calc_t3_for_decomposition, cc3)
+          main_name = method_name(ecmethod)
           println("$main_name correlation energy: ",ECC)
           println("$main_name total energy: ",ECC+EHF)
         end 
       end
-    else
-      main_name = method_name(T1a,dc)
     end
+    println()
     flush(stdout)
 
-    println(add2name*"$main_name correlation energy: ",ECC)
-    println(add2name*"$main_name total energy: ",ECC+EHF)
-    t1 = print_time(EC, t1,"CC",1)
-    delete_temporary_files(EC)
-    if length(method_names) == 1
-      if ecmethod.exclevel[3] != :none
-        return EHF, EMp2, ECC, ET3
-      else
-        return EHF, EMp2, ECC
+    if ecmethod.theory[1:2] == "2D"
+      W = load(EC,"2d_ccsd_W")[1]
+      @printf "%26s %16.12f \n" "$main_name singlet energy:" EHF+ECC+W
+      @printf "%26s %16.12f \n" "$main_name triplet energy:" EHF+ECC-W
+      t1 = print_time(EC, t1,"CC",1)
+      delete_temporary_files!(EC)
+      draw_endline()
+      return EHF, EMp2, ECC, W
+    else
+      println("$main_name correlation energy: ",ECC)
+      println("$main_name total energy: ",ECC+EHF)
+      t1 = print_time(EC, t1,"CC",1)
+      delete_temporary_files!(EC)
+      draw_endline()
+      if length(method_names) == 1
+        if ecmethod.exclevel[3] != :none
+          return EHF, EMp2, ECC, ET3
+        else
+          return EHF, EMp2, ECC
+        end
       end
     end
   end
-end
-
-
-function main()
-  EC = ECInfo()
-  fcidump, method_string, occa, occb = parse_commandline(EC)
-  if fcidump == ""
-    println("No input file given.")
-    return
-  end
-  if EC.out != ""
-    output = EC.out
-  else
-    output = nothing
-  end
-  redirect_stdio(stdout=output) do
-    ECdriver(EC, method_string, fcidump=fcidump, occa=occa, occb=occb)
-  end
-end
-if abspath(PROGRAM_FILE) == @__FILE__
-  main()
 end
 
 end #module

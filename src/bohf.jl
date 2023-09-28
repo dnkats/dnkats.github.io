@@ -3,6 +3,7 @@
 """
 module BOHF
 using LinearAlgebra, TensorOperations, Printf
+using ..ElemCo.Utils
 using ..ElemCo.ECInfos
 using ..ElemCo.TensorTools
 using ..ElemCo.FciDump
@@ -17,7 +18,8 @@ export bohf, bouhf
   Perform BO-HF using integrals from fcidump EC.fd.
 """
 function bohf(EC::ECInfo)
-  println("Bi-orthogonal Hartree-Fock")
+  print_info("Bi-orthogonal Hartree-Fock")
+  setup_space_fd!(EC)
   flush(stdout)
   SP = EC.space
   norb = length(SP[':'])
@@ -65,8 +67,10 @@ function bohf(EC::ECInfo)
   cMOl = (inv(cMOr))'
   println("BO-HF energy: ", EHF)
   flush(stdout)
-  delete_temporary_files(EC)
-  return EHF, ϵ, cMOl, cMOr
+  delete_temporary_files!(EC)
+  save!(EC, EC.options.wf.orb, cMOr, description="BOHF right orbitals")
+  save!(EC, EC.options.wf.orb*EC.options.wf.left, cMOl, description="BOHF left orbitals")
+  return EHF
 end
 
 """ 
@@ -75,7 +79,8 @@ end
   Perform BO-UHF using integrals from fcidump EC.fd.
 """
 function bouhf(EC::ECInfo)
-  println("Bi-orthogonal unrestricted Hartree-Fock")
+  print_info("Bi-orthogonal unrestricted Hartree-Fock")
+  setup_space_fd!(EC)
   flush(stdout)
   SP = EC.space
   norb = length(SP[':'])
@@ -134,8 +139,10 @@ function bouhf(EC::ECInfo)
   end
   println("BO-UHF energy: ", EHF)
   flush(stdout)
-  delete_temporary_files(EC)
-  return EHF, ϵ, cMOl, cMOr
+  delete_temporary_files!(EC)
+  save!(EC, EC.options.wf.orb, cMOr, description="BOHF right orbitals")
+  save!(EC, EC.options.wf.orb*EC.options.wf.left, cMOl, description="BOHF left orbitals")
+  return EHF
 end
 
 

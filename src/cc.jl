@@ -9,104 +9,22 @@ end
 using LinearAlgebra
 #BLAS.set_num_threads(1)
 using TensorOperations
-# using TSVD
-using IterativeSolvers
 using Printf
 using ..ElemCo.Utils
 using ..ElemCo.ECInfos
+using ..ElemCo.ECMethods
 using ..ElemCo.TensorTools
 using ..ElemCo.FciDump
 using ..ElemCo.DIIS
+using ..ElemCo.DecompTools
 using ..ElemCo.DFCoupledCluster
+using ..ElemCo.OrbTools
+using ..ElemCo.CCTools
 
-export calc_MP2, calc_UMP2, method_name, calc_cc, calc_pertT
+export calc_MP2, calc_UMP2, calc_cc, calc_pertT
 
 include("cc_tests.jl")
 
-"""
-    orbital_energies(EC::ECInfo, spincase::Symbol=:α)
-
-  Return orbital energies for a given `spincase`∈{`:α`,`:β`}.
-"""
-function orbital_energies(EC::ECInfo, spincase::Symbol=:α)
-  if spincase == :α
-    eps = load(EC, "e_m")
-    ϵo = eps[EC.space['o']]
-    ϵv = eps[EC.space['v']]
-  else
-    eps = load(EC, "e_M")
-    ϵo = eps[EC.space['O']]
-    ϵv = eps[EC.space['V']]
-  end
-  return ϵo, ϵv
-end
-
-"""
-    update_singles(R1, ϵo, ϵv, shift)
-
-  Calculate update for singles amplitudes.
-"""
-function update_singles(R1, ϵo, ϵv, shift)
-  ΔT1 = deepcopy(R1)
-  for I ∈ CartesianIndices(ΔT1)
-    a,i = Tuple(I)
-    ΔT1[I] /= -(ϵv[a] - ϵo[i] + shift)
-  end
-  return ΔT1
-end
-
-"""
-    update_singles(EC::ECInfo, R1; spincase::Symbol=:α, use_shift=true)
-
-  Calculate update for singles amplitudes for a given `spincase`∈{`:α`,`:β`}.
-"""
-function update_singles(EC::ECInfo, R1; spincase::Symbol=:α, use_shift=true)
-  shift = use_shift ? EC.options.cc.shifts : 0.0
-  if spincase == :α
-    ϵo, ϵv = orbital_energies(EC)
-    return update_singles(R1, ϵo, ϵv, shift)
-  else
-    ϵob, ϵvb = orbital_energies(EC, :β)
-    return update_singles(R1, ϵob, ϵvb, shift)
-  end
-end
-
-"""
-    update_doubles(R2, ϵo1, ϵv1, ϵo2, ϵv2, shift)
-
-  Calculate update for doubles amplitudes.
-"""
-function update_doubles(R2, ϵo1, ϵv1, ϵo2, ϵv2, shift, antisymmetrize=false)
-  ΔT2 = deepcopy(R2)
-  if antisymmetrize
-    ΔT2 -= permutedims(R2,(1,2,4,3))
-  end
-  for I ∈ CartesianIndices(ΔT2)
-    a,b,i,j = Tuple(I)
-    ΔT2[I] /= -(ϵv1[a] + ϵv2[b] - ϵo1[i] - ϵo2[j] + shift)
-  end
-  return ΔT2
-end
-
-"""
-    update_doubles(EC::ECInfo, R2; spincase::Symbol=:α, antisymmetrize=false, use_shift=true)
-
-  Calculate update for doubles amplitudes for a given `spincase`∈{`:α`,`:β`,`:αβ`}.
-"""
-function update_doubles(EC::ECInfo, R2; spincase::Symbol=:α, antisymmetrize=false, use_shift=true)
-  shift = use_shift ? EC.options.cc.shiftp : 0.0
-  if spincase == :α
-    ϵo, ϵv = orbital_energies(EC)
-    return update_doubles(R2, ϵo, ϵv, ϵo, ϵv, shift, antisymmetrize)
-  elseif spincase == :β
-    ϵob, ϵvb = orbital_energies(EC, :β)
-    return update_doubles(R2, ϵob, ϵvb, ϵob, ϵvb, shift, antisymmetrize)
-  else
-    ϵo, ϵv = orbital_energies(EC)
-    ϵob, ϵvb = orbital_energies(EC, :β)
-    return update_doubles(R2, ϵo, ϵv, ϵob, ϵvb, shift, antisymmetrize)
-  end
-end
 
 """
     calc_singles_energy(EC::ECInfo, T1; fock_only=false)
@@ -116,10 +34,12 @@ end
 function calc_singles_energy(EC::ECInfo, T1; fock_only=false)
   SP = EC.space
   ET1 = 0.0
-  if !fock_only
-    @tensoropt ET1 += (2.0*T1[a,i]*T1[b,j]-T1[b,i]*T1[a,j])*ints2(EC,"oovv")[i,j,a,b]
+  if length(T1) > 0
+    if !fock_only
+      @tensoropt ET1 += (2.0*T1[a,i]*T1[b,j]-T1[b,i]*T1[a,j])*ints2(EC,"oovv")[i,j,a,b]
+    end
+    @tensoropt ET1 += 2.0*T1[a,i] * load(EC,"f_mm")[SP['o'],SP['v']][i,a]
   end
-  @tensoropt ET1 += 2.0*T1[a,i] * load(EC,"f_mm")[SP['o'],SP['v']][i,a]
   return ET1
 end
 
@@ -132,17 +52,21 @@ function calc_singles_energy(EC::ECInfo, T1a, T1b; fock_only=false)
   SP = EC.space
   ET1 = 0.0
   if !fock_only
-    @tensoropt ET1 += 0.5*(T1a[a,i]*T1a[b,j]-T1a[b,i]*T1a[a,j])*ints2(EC,"oovv")[i,j,a,b]
-    if n_occb_orbs(EC) > 0
-      @tensoropt begin
-        ET1 += 0.5*(T1b[a,i]*T1b[b,j]-T1b[b,i]*T1b[a,j])*ints2(EC,"OOVV")[i,j,a,b]
-        ET1 += T1a[a,i]*T1b[b,j]*ints2(EC,"oOvV")[i,j,a,b]
+    if length(T1a) > 0
+      @tensoropt ET1 += 0.5*(T1a[a,i]*T1a[b,j]-T1a[b,i]*T1a[a,j])*ints2(EC,"oovv")[i,j,a,b]
+    end
+    if length(T1b) > 0
+      @tensoropt ET1 += 0.5*(T1b[a,i]*T1b[b,j]-T1b[b,i]*T1b[a,j])*ints2(EC,"OOVV")[i,j,a,b]
+      if length(T1a) > 0
+        @tensoropt ET1 += T1a[a,i]*T1b[b,j]*ints2(EC,"oOvV")[i,j,a,b]
       end
     end
   end
-  @tensoropt begin
-    ET1 += T1a[a,i] * load(EC,"f_mm")[SP['o'],SP['v']][i,a]
-    ET1 += T1b[a,i] * load(EC,"f_MM")[SP['O'],SP['V']][i,a]
+  if length(T1a) > 0
+    @tensoropt ET1 += T1a[a,i] * load(EC,"f_mm")[SP['o'],SP['v']][i,a]
+  end
+  if length(T1b) > 0
+    @tensoropt ET1 += T1b[a,i] * load(EC,"f_MM")[SP['O'],SP['V']][i,a]
   end
   return ET1
 end
@@ -184,7 +108,8 @@ function calc_hylleraas(EC::ECInfo, T1, T2, R1, R2)
     ET2 = (2.0*T2[a,b,i,j] - T2[b,a,i,j]) * int2[i,j,a,b]
   end
   if length(T1) > 0
-    dfock = load(EC,"dfock"*'o')
+    mo = 'm'
+    dfock = load(EC,"df_"*mo*mo)
     fov = dfock[SP['o'],SP['v']] + load(EC,"f_mm")[SP['o'],SP['v']] # undressed part should be with factor two
     @tensoropt ET1 = (fov[i,a] + 2.0 * R1[a,i])*T1[a,i]
     # ET1 = scalar(2.0*(load(EC,"f_mm")[SP['o'],SP['v']][i,a] + R1[a,i])*T1[a,i])
@@ -212,7 +137,8 @@ function calc_hylleraas4spincase(EC::ECInfo, o1, v1, o2, v2, T1, T2, R1, R2, fov
     ET2 = fac*T2[a,b,i,j] * int2[i,j,a,b]
   end
   if length(T1) > 0
-    dfock = load(EC,"dfock"*o1)
+    mo = space4spin('m', isalphaspin(o1,o1))
+    dfock = load(EC,"df_"*mo*mo)
     dfov = dfock[SP[o1],SP[v1]] + fov # undressed part should be with factor two
     @tensoropt ET1 = (0.5*dfov[i,a] + R1[a,i])*T1[a,i]
     ET2 += ET1
@@ -235,62 +161,6 @@ function calc_hylleraas(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, R1a, R1b, R2a, R2b
   return Eh
 end
 
-"""
-    calc_singles_norm(T1)
-
-  Calculate squared norm of closed-shell singles amplitudes.
-"""
-function calc_singles_norm(T1)
-  @tensor NormT1 = 2.0*T1[a,i]*T1[a,i]
-  return NormT1
-end
-
-"""
-    calc_singles_norm(T1a, T1b)
-
-  Calculate squared norm of unrestricted singles amplitudes.
-"""
-function calc_singles_norm(T1a, T1b)
-  @tensor begin
-    NormT1 = T1a[a,i]*T1a[a,i]
-    NormT1 += T1b[a,i]*T1b[a,i]
-  end
-  return NormT1
-end
-
-"""
-    calc_doubles_norm(T2)
-
-  Calculate squared norm of closed-shell doubles amplitudes.
-"""
-function calc_doubles_norm(T2)
-  @tensoropt NormT2 = (2.0*T2[a,b,i,j] - T2[b,a,i,j])*T2[a,b,i,j]
-  return NormT2
-end
-
-"""
-    calc_doubles_norm(T2a, T2b, T2ab)
-
-  Calculate squared norm of unrestricted doubles amplitudes.
-"""
-function calc_doubles_norm(T2a, T2b, T2ab)
-  @tensoropt begin
-    NormT2 = 0.25*T2a[a,b,i,j]*T2a[a,b,i,j]
-    NormT2 += 0.25*T2b[a,b,i,j]*T2b[a,b,i,j]
-    NormT2 += T2ab[a,b,i,j]*T2ab[a,b,i,j]
-  end
-  return NormT2
-end
-
-""" 
-    lenspace(EC::ECInfo, o1::Char, o2::Char)
-
-  Return lengths of two orbital spaces.
-"""
-function lenspace(EC::ECInfo, o1::Char, o2::Char)
-  return length(EC.space[o1]), length(EC.space[o2])
-end
-
 """ 
     calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2::Char)
 
@@ -302,7 +172,7 @@ end
 function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2::Char)
   t1 = time_ns()
   mixed = (o1 != o2)
-  no1, no2 = lenspace(EC,o1,o2)
+  no1, no2 = len_spaces(EC,o1*o2)
   # first make half-transformed integrals
   if EC.options.cc.calc_d_vvvv
     # <a\hat c|bd>
@@ -310,7 +180,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     vovv = ints2(EC,v1*o2*v1*v2)
     @tensoropt hd_vvvv[a,c,b,d] -= vovv[a,k,b,d] * T12[c,k]
     vovv = nothing
-    save(EC,"hd_"*v1*v2*v1*v2,hd_vvvv)
+    save!(EC,"hd_"*v1*v2*v1*v2,hd_vvvv)
     hd_vvvv = nothing
     t1 = print_time(EC,t1,"dress hd_"*v1*v2*v1*v2,3)
   end
@@ -334,7 +204,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     vvov = ints2(EC,v1*v2*o1*v2)
     @tensoropt hd_vvoo[a,c,j,l] += vvov[a,c,j,d] * T12[d,l]
     vvov = nothing
-    save(EC,"hd_"*v1*v2*o1*o2,hd_vvoo)
+    save!(EC,"hd_"*v1*v2*o1*o2,hd_vvoo)
     hd_vvoo = nothing
     t1 = print_time(EC,t1,"dress hd_"*v1*v2*o1*o2,3)
   end
@@ -363,7 +233,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
   d_oovo = ints2(EC,o1*o2*v1*o2)
   oovv = ints2(EC,o1*o2*v1*v2)
   @tensoropt d_oovo[k,i,d,j] += oovv[k,i,d,b] * T12[b,j]
-  save(EC,"d_"*o1*o2*v1*o2,d_oovo)
+  save!(EC,"d_"*o1*o2*v1*o2,d_oovo)
   t1 = print_time(EC,t1,"dress d_"*o1*o2*v1*o2,3)
   # <ak\hat|jd>
   vovv = ints2(EC,v1*o2*v1*v2)
@@ -374,7 +244,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     d_ooov = ints2(EC,o1*o2*o1*v2)
     @tensoropt d_ooov[k,l,j,d] += oOvV[k,l,b,d] * T1[b,j]
     oOvV = nothing
-    save(EC,"d_"*o1*o2*o1*v2,d_ooov)
+    save!(EC,"d_"*o1*o2*o1*v2,d_ooov)
     t1 = print_time(EC,t1,"dress d_"*o1*o2*o1*v2,3)
     if no1 > 0 && no2 > 0
       @tensoropt begin
@@ -382,7 +252,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
         d_voov[a,i,j,d] += vovv[a,i,b,d] * T1[b,j]
       end
     end
-    save(EC,"d_"*v1*o2*o1*v2,d_voov)
+    save!(EC,"d_"*v1*o2*o1*v2,d_voov)
   else
     if no1 > 0 && no2 > 0
       @tensoropt begin
@@ -390,7 +260,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
         d_voov[a,k,j,d] += vovv[a,k,b,d] * T1[b,j]
       end
     end
-    save(EC,"d_"*v1*o2*o1*v2,d_voov)
+    save!(EC,"d_"*v1*o2*o1*v2,d_voov)
   end
   t1 = print_time(EC,t1,"dress d_"*v1*o2*o1*v2,3)
   # finish half-dressing
@@ -408,7 +278,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
       d_ovvo[i,A,b,J] -= d_oovo[i,K,b,J] * T12[A,K]
       d_ovvo[i,A,b,J] += ovvv[i,A,b,C] * T12[C,J]
     end
-    save(EC,"d_"*o1*v2*v1*o2,d_ovvo)
+    save!(EC,"d_"*o1*v2*v1*o2,d_ovvo)
     t1 = print_time(EC,t1,"dress d_"*o1*v2*v1*o2,3)
 
     hd_ovov = ints2(EC,o1*v2*o1*v2)
@@ -424,7 +294,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
       hd_vvvo[a,c,b,l] -= hd_vovo[a,k,b,l] * T12[c,k]
       hd_vvvo[a,c,b,l] += vvvv[a,c,b,d] * T12[d,l]
     end
-    save(EC,"hd_"*v1*v2*v1*o2,hd_vvvo)
+    save!(EC,"hd_"*v1*v2*v1*o2,hd_vvvo)
     hd_vvvo = nothing
     if mixed
       hd_vvov = ints2(EC,v1*v2*o1*v2)
@@ -432,7 +302,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
         hd_vvov[a,c,l,b] -= hd_ovov[k,c,l,b] * T1[a,k]
         hd_vvov[a,c,l,b] += vvvv[a,c,d,b] * T1[d,l]
       end
-      save(EC,"hd_"*v1*v2*o1*v2,hd_vvov)
+      save!(EC,"hd_"*v1*v2*o1*v2,hd_vvov)
       hd_vvov = nothing
     end
     vvvv = nothing
@@ -444,13 +314,13 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     # <ak\hat|bd>
     d_vovv = ints2(EC,v1*o2*v1*v2)
     @tensoropt d_vovv[a,k,b,d] -= oovv[i,k,b,d] * T1[a,i]
-    save(EC,"d_"*v1*o2*v1*v2,d_vovv)
+    save!(EC,"d_"*v1*o2*v1*v2,d_vovv)
     t1 = print_time(EC,t1,"dress d_"*v1*o2*v1*v2,3)
     if mixed
       d_vovv = nothing
       d_ovvv = ints2(EC,o1*v2*v1*v2)
       @tensoropt d_ovvv[i,b,a,c] -= oovv[i,j,a,c] * T12[b,j]
-      save(EC,"d_"*o1*v2*v1*v2,d_ovvv)
+      save!(EC,"d_"*o1*v2*v1*v2,d_ovvv)
       t1 = print_time(EC,t1,"dress d_"*o1*v2*v1*v2,3)
     end
   end
@@ -468,20 +338,20 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
       @tensoropt d_vvvv[a,c,b,d] -= d_ovvv[i,c,b,d] * T1[a,i]
       d_ovvv = nothing
     end
-    save(EC,"d_"*v1*v2*v1*v2,d_vvvv)
+    save!(EC,"d_"*v1*v2*v1*v2,d_vvvv)
     d_vvvv = nothing
     t1 = print_time(EC,t1,"dress d_"*v1*v2*v1*v2,3)
   end
   # <ak\hat|bl>
   d_vovo = hd_vovo
   @tensoropt d_vovo[a,k,b,l] -= d_oovo[i,k,b,l] * T1[a,i]
-  save(EC,"d_"*v1*o2*v1*o2,d_vovo)
+  save!(EC,"d_"*v1*o2*v1*o2,d_vovo)
   hd_vovo = nothing
   d_vovo = nothing
   if mixed
     d_ovov = hd_ovov
     @tensoropt d_ovov[k,a,l,b] -= d_ooov[k,i,l,b] * T12[a,i]
-    save(EC,"d_"*o1*v2*o1*v2,d_ovov)
+    save!(EC,"d_"*o1*v2*o1*v2,d_ovov)
     hd_ovov = nothing
     d_ovov = nothing
   end
@@ -491,11 +361,11 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
   if no1 > 0 && no2 > 0
     @tensoropt d_vooo[a,k,j,l] += d_voov[a,k,j,d] * T12[d,l]
   end
-  save(EC,"d_"*v1*o2*o1*o2,d_vooo)
+  save!(EC,"d_"*v1*o2*o1*o2,d_vooo)
   if mixed
     d_ovoo = hd_ovoo
     @tensoropt d_ovoo[k,a,l,j] += d_ovvo[k,a,d,j] * T1[d,l]
-    save(EC,"d_"*o1*v2*o1*o2,d_ovoo)
+    save!(EC,"d_"*o1*v2*o1*o2,d_ovoo)
   end
   t1 = print_time(EC,t1,"dress d_"*v1*o2*o1*o2,3)
   if EC.options.cc.calc_d_vvvo
@@ -503,16 +373,16 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     if !mixed
       d_vvvo = load(EC,"hd_"*v1*v2*v1*o2)
       @tensoropt d_vvvo[a,c,b,l] -= d_voov[c,i,l,b] * T1[a,i]
-      save(EC,"d_"*v1*v2*v1*o2,d_vvvo)
+      save!(EC,"d_"*v1*v2*v1*o2,d_vvvo)
       d_vvvo = nothing
     else
       d_vvvo = load(EC,"hd_"*v1*v2*v1*o2)
       @tensoropt d_vvvo[c,a,b,l] -= d_ovvo[i,a,b,l] * T1[c,i]
-      save(EC,"d_"*v1*v2*v1*o2,d_vvvo)
+      save!(EC,"d_"*v1*v2*v1*o2,d_vvvo)
       d_vvvo = nothing
       d_vvov = load(EC,"hd_"*v1*v2*o1*v2)
       @tensoropt d_vvov[a,c,l,b] -= d_voov[a,i,l,b] * T1[c,i]
-      save(EC,"d_"*v1*v2*o1*v2,d_vvov)
+      save!(EC,"d_"*v1*v2*o1*v2,d_vvov)
       d_vvov = nothing
     end
     t1 = print_time(EC,t1,"dress d_"*v1*v2*v1*o2,3)
@@ -520,7 +390,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
   # <ij\hat|kl>
   d_oooo = hd_oooo
   @tensoropt d_oooo[i,k,j,l] += d_oovo[i,k,b,l] * T1[b,j]
-  save(EC,"d_"*o1*o2*o1*o2,d_oooo)
+  save!(EC,"d_"*o1*o2*o1*o2,d_oooo)
   t1 = print_time(EC,t1,"dress d_"*o1*o2*o1*o2,3)
   if EC.options.cc.calc_d_vvoo
     if !EC.options.cc.calc_d_vvvo
@@ -536,7 +406,7 @@ function calc_dressed_ints(EC::ECInfo, T1, T12, o1::Char, v1::Char, o2::Char, v2
     else
       @tensoropt d_vvoo[a,c,j,l] -= d_ovoo[i,c,j,l] * T1[a,i] 
     end
-    save(EC,"d_"*v1*v2*o1*o2,d_vvoo)
+    save!(EC,"d_"*v1*v2*o1*o2,d_vvoo)
     d_vvoo = nothing
     t1 = print_time(EC,t1,"dress d_"*v1*v2*o1*o2,3)
   end
@@ -545,7 +415,7 @@ end
 """ 
     dress_fock_closedshell(EC::ECInfo, T1)
 
-  Dress the fock matrix (closed-shell). The dressed fock matrix is stored as `dfocko`.
+  Dress the fock matrix (closed-shell). The dressed fock matrix is stored as `df_mm`.
 """
 function dress_fock_closedshell(EC::ECInfo, T1)
   t1 = time_ns()
@@ -558,7 +428,7 @@ function dress_fock_closedshell(EC::ECInfo, T1)
   dinter = d_int1[SP['o'],:]
   @tensoropt d_int1[SP['v'],:][b,p] -= dinter[j,p] * T1[b,j]
   # display(d_int1[SP['v'],SP['o']])
-  save(EC,"dint1o",d_int1)
+  save!(EC,"dh_mm",d_int1)
   t1 = print_time(EC,t1,"dress int1",3)
 
   # calc dressed fock
@@ -581,7 +451,7 @@ function dress_fock_closedshell(EC::ECInfo, T1)
   dfock[SP['o'],SP['v']] += fov
   dfock[SP['v'],SP['v']] += fvv
 
-  save(EC,"dfocko",dfock)
+  save!(EC,"df_mm",dfock)
   t1 = print_time(EC,t1,"dress fock",3)
 end
 
@@ -596,9 +466,11 @@ function dress_fock_samespin(EC::ECInfo, T1, o1::Char, v1::Char)
   if isuppercase(o1)
     spin = :β
     no1 = n_occb_orbs(EC)
+    mo = 'M'
   else
     spin = :α
     no1 = n_occ_orbs(EC)
+    mo = 'm'
   end
   # dress 1-el part
   d_int1 = deepcopy(integ1(EC.fd,spin))
@@ -606,7 +478,7 @@ function dress_fock_samespin(EC::ECInfo, T1, o1::Char, v1::Char)
   @tensoropt d_int1[:,SP[o1]][p,j] += dinter[p,b] * T1[b,j]
   dinter = d_int1[SP[o1],:]
   @tensoropt d_int1[SP[v1],:][b,p] -= dinter[j,p] * T1[b,j]
-  save(EC,"dint1"*o1,d_int1)
+  save!(EC,"dh_"*mo*mo,d_int1)
   t1 = print_time(EC,t1,"dress int1",3)
   # calc dressed fock
   dfock = d_int1
@@ -630,7 +502,7 @@ function dress_fock_samespin(EC::ECInfo, T1, o1::Char, v1::Char)
   dfock[SP[v1],SP[o1]] += fvo
   dfock[SP[o1],SP[v1]] += fov
   dfock[SP[v1],SP[v1]] += fvv
-  save(EC,"dfock"*o1,dfock)
+  save!(EC,"df_"*mo*mo,dfock)
   t1 = print_time(EC,t1,"dress fock",3)
 end
 
@@ -667,19 +539,19 @@ function dress_fock_oppositespin(EC::ECInfo)
   @tensoropt fVV[a,b] := d_ovov[k,a,k,b]
   d_ovov = nothing
 
-  dfocka = load(EC,"dfocko")
+  dfocka = load(EC,"df_mm")
   dfocka[SP['o'],SP['o']] += foo
   dfocka[SP['o'],SP['v']] += fov
   dfocka[SP['v'],SP['o']] += fvo
   dfocka[SP['v'],SP['v']] += fvv
-  save(EC,"dfocko",dfocka)
+  save!(EC,"df_mm",dfocka)
 
-  dfockb = load(EC,"dfockO")
+  dfockb = load(EC,"df_MM")
   dfockb[SP['O'],SP['O']] += fOO
   dfockb[SP['O'],SP['V']] += fOV
   dfockb[SP['V'],SP['O']] += fVO
   dfockb[SP['V'],SP['V']] += fVV
-  save(EC,"dfock"*'O',dfockb)
+  save!(EC,"df_MM",dfockb)
 end
 
 """
@@ -709,76 +581,84 @@ end
 function pseudo_dressed_ints(EC::ECInfo, unrestricted=false)
   #TODO write like in itf with chars as arguments, so three calls for three spin cases...
   t1 = time_ns()
-  save(EC,"d_oovo",ints2(EC,"oovo"))
-  save(EC,"d_voov",ints2(EC,"voov"))
+  save!(EC,"d_oovo",ints2(EC,"oovo"))
+  save!(EC,"d_voov",ints2(EC,"voov"))
   if EC.options.cc.calc_d_vovv
-    save(EC,"d_vovv",ints2(EC,"vovv"))
+    save!(EC,"d_vovv",ints2(EC,"vovv"))
   end
   if EC.options.cc.calc_d_vvvv
-    save(EC,"d_vvvv",ints2(EC,"vvvv"))
+    save!(EC,"d_vvvv",ints2(EC,"vvvv"))
   end
-  save(EC,"d_vovo",ints2(EC,"vovo"))
-  save(EC,"d_vooo",ints2(EC,"vooo"))
+  save!(EC,"d_vovo",ints2(EC,"vovo"))
+  save!(EC,"d_vooo",ints2(EC,"vooo"))
   if EC.options.cc.calc_d_vvvo
-    save(EC,"d_vvvo",ints2(EC,"vvvo"))
+    save!(EC,"d_vvvo",ints2(EC,"vvvo"))
   end
-  save(EC,"d_oooo",ints2(EC,"oooo"))
+  save!(EC,"d_oooo",ints2(EC,"oooo"))
   if EC.options.cc.calc_d_vvoo
-    save(EC,"d_vvoo",ints2(EC,"vvoo"))
+    save!(EC,"d_vvoo",ints2(EC,"vvoo"))
   end
-  save(EC,"dint1"*'o',integ1(EC.fd))
-  save(EC,"dfock"*'o',load(EC,"f_mm"))
-  save(EC,"dfock"*'O',load(EC,"f_MM"))
+  save!(EC,"dh_mm",integ1(EC.fd))
+  save!(EC,"df_mm",load(EC,"f_mm"))
+  save!(EC,"df_MM",load(EC,"f_MM"))
   t1 = print_time(EC,t1,"pseudo-dressing",3)
   if unrestricted
-    save(EC,"d_OOVO",ints2(EC,"OOVO"))
-    save(EC,"d_VVOO",ints2(EC,"VVOO"))
-    save(EC,"d_VVVV",ints2(EC,"VVVV"))
-    save(EC,"d_OOOO",ints2(EC,"OOOO"))
-    save(EC,"d_VOOO",ints2(EC,"VOOO"))
-    save(EC,"d_VOOV",ints2(EC,"VOOV"))
-    save(EC,"d_VOVO",ints2(EC,"VOVO"))
-    save(EC,"d_VOVV",ints2(EC,"VOVV"))
+    save!(EC,"d_OOVO",ints2(EC,"OOVO"))
+    save!(EC,"d_VVOO",ints2(EC,"VVOO"))
+    save!(EC,"d_VVVV",ints2(EC,"VVVV"))
+    save!(EC,"d_OOOO",ints2(EC,"OOOO"))
+    save!(EC,"d_VOOO",ints2(EC,"VOOO"))
+    save!(EC,"d_VOOV",ints2(EC,"VOOV"))
+    save!(EC,"d_VOVO",ints2(EC,"VOVO"))
+    save!(EC,"d_VOVV",ints2(EC,"VOVV"))
 
-    save(EC,"d_oOvO",ints2(EC,"oOvO"))
-    save(EC,"d_oOoV",ints2(EC,"oOoV"))
-    save(EC,"d_vVoO",ints2(EC,"vVoO"))
-    save(EC,"d_vVvV",ints2(EC,"vVvV"))
-    save(EC,"d_oOoO",ints2(EC,"oOoO"))
-    # save(EC,"d_voov",ints2(EC,"voov"))
-    save(EC,"d_oVvO",ints2(EC,"oVvO"))
-    save(EC,"d_vOoV",ints2(EC,"vOoV"))
+    save!(EC,"d_oOvO",ints2(EC,"oOvO"))
+    save!(EC,"d_oOoV",ints2(EC,"oOoV"))
+    save!(EC,"d_vVoO",ints2(EC,"vVoO"))
+    save!(EC,"d_vVvV",ints2(EC,"vVvV"))
+    save!(EC,"d_oOoO",ints2(EC,"oOoO"))
+    # save!(EC,"d_voov",ints2(EC,"voov"))
+    save!(EC,"d_oVvO",ints2(EC,"oVvO"))
+    save!(EC,"d_vOoV",ints2(EC,"vOoV"))
     #vovo
-    save(EC,"d_vOvO",ints2(EC,"vOvO"))
-    save(EC,"d_oVoV",ints2(EC,"oVoV"))
-    save(EC,"d_vOoO",ints2(EC,"vOoO"))
-    save(EC,"d_oVoO",ints2(EC,"oVoO"))
-    save(EC,"d_vOvV",ints2(EC,"vOvV"))
-    save(EC,"d_oVvV",ints2(EC,"oVvV"))
-    save(EC,"dint1"*'O',integ1(EC.fd))
+    save!(EC,"d_vOvO",ints2(EC,"vOvO"))
+    save!(EC,"d_oVoV",ints2(EC,"oVoV"))
+    save!(EC,"d_vOoO",ints2(EC,"vOoO"))
+    save!(EC,"d_oVoO",ints2(EC,"oVoO"))
+    save!(EC,"d_vOvV",ints2(EC,"vOvV"))
+    save!(EC,"d_oVvV",ints2(EC,"oVvV"))
+    save!(EC,"dh_MM",integ1(EC.fd))
   end
 end
 
 """ 
-    calc_MP2(EC::ECInfo)
+    calc_MP2(EC::ECInfo, addsingles=true)
 
   Calculate closed-shell MP2 energy and amplitudes. 
-  Return (EMp2, T2) 
+  The amplitudes are stored in `T_vvoo` file.
+  If `addsingles`: singles are also calculated and stored in `T_vo` file.
+  Return EMp2 
 """
-function calc_MP2(EC::ECInfo)
+function calc_MP2(EC::ECInfo, addsingles=true)
   T2 = update_doubles(EC,ints2(EC,"vvoo"), use_shift=false)
   EMp2 = calc_doubles_energy(EC,T2)
-  ϵo, ϵv = orbital_energies(EC)
-  T1 = update_singles(load(EC,"f_mm")[EC.space['v'],EC.space['o']], ϵo, ϵv, 0.0)
-  EMp2 += calc_singles_energy(EC,T1,fock_only=true)
-  return EMp2, T2
+  save!(EC, "T_vvoo", T2)
+  if addsingles
+    ϵo, ϵv = orbital_energies(EC)
+    T1 = update_singles(load(EC,"f_mm")[EC.space['v'],EC.space['o']], ϵo, ϵv, 0.0)
+    EMp2 += calc_singles_energy(EC,T1,fock_only=true)
+    save!(EC, "T_vo", T1)
+  end
+  return EMp2
 end
 
 """ 
     calc_UMP2(EC::ECInfo, addsingles=true)
 
   Calculate unrestricted MP2 energy and amplitudes. 
-  Return (EMp2, T2a, T2b, T2ab)
+  The amplitudes are stored in `T_vvoo`, `T_VVOO`, and `T_vVoO` files.
+  If `addsingles`: singles are also calculated and stored in `T_vo` and `T_VO` files.
+  Return EMp2
 """
 function calc_UMP2(EC::ECInfo, addsingles=true)
   SP = EC.space
@@ -786,32 +666,17 @@ function calc_UMP2(EC::ECInfo, addsingles=true)
   T2b = update_doubles(EC,ints2(EC,"VVOO"), spincase=:β, antisymmetrize = true, use_shift=false)
   T2ab = update_doubles(EC,ints2(EC,"vVoO"), spincase=:αβ, use_shift=false)
   EMp2 = calc_doubles_energy(EC,T2a,T2b,T2ab)
+  save!(EC, "T_vvoo", T2a)
+  save!(EC, "T_VVOO", T2b)
+  save!(EC, "T_vVoO", T2ab)
   if addsingles
     T1a = update_singles(EC,load(EC,"f_mm")[SP['v'],SP['o']], spincase=:α, use_shift=false)
     T1b = update_singles(EC,load(EC,"f_MM")[SP['V'],SP['O']], spincase=:β, use_shift=false)
     EMp2 += calc_singles_energy(EC, T1a, T1b, fock_only = true)
+    save!(EC, "T_vo", T1a)
+    save!(EC, "T_VO", T1b)
   end
-  return EMp2, T2a, T2b, T2ab
-end
-
-
-"""
-    method_name(T1, dc=false)
-  
-  Guess method name (CCSD/DCSD/CCD/DCD)
-"""
-function method_name(T1, dc=false)
-  if dc
-    name = "DC"
-  else
-    name = "CC"
-  end
-  if ndims(T1) != 2
-    name *= "D"
-  else
-    name *= "SD"
-  end
-  return name
+  return EMp2
 end
 
 """ 
@@ -951,7 +816,7 @@ end
 
   Calculate CCSD or DCSD closed-shell residual.
 """
-function calc_ccsd_resid(EC::ECInfo, T1, T2, dc)
+function calc_ccsd_resid(EC::ECInfo, T1, T2; dc = false, tworef = false, fixref = false)
   t1 = time_ns()
   SP = EC.space
   nocc = n_occ_orbs(EC)
@@ -964,10 +829,10 @@ function calc_ccsd_resid(EC::ECInfo, T1, T2, dc)
     pseudo_dressed_ints(EC)
   end
   @tensor T2t[a,b,i,j] := 2.0 * T2[a,b,i,j] - T2[b,a,i,j]
-  dfock = load(EC,"dfock"*'o')
+  dfock = load(EC,"df_mm")
   if length(T1) > 0
     if EC.options.cc.use_kext
-      dint1 = load(EC,"dint1"*'o')
+      dint1 = load(EC,"dh_mm")
       R1 = dint1[SP['v'],SP['o']]
     else
       R1 = dfock[SP['v'],SP['o']]
@@ -1118,13 +983,15 @@ function calc_ccsd_resid(EC::ECInfo, T1, T2, dc)
 end
 
 """
-    calc_pertT(EC::ECInfo, T1, T2; save_t3=false)
+    calc_pertT(EC::ECInfo; save_t3=false)
 
   Calculate (T) correction for closed-shell CCSD.
 
   Return ( (T)-energy, [T]-energy))
 """
-function calc_pertT(EC::ECInfo, T1, T2; save_t3=false)
+function calc_pertT(EC::ECInfo; save_t3=false)
+  T1 = load(EC,"T_vo")
+  T2 = load(EC,"T_vvoo")
   # <ab|ck>
   abck = ints2(EC,"vvvo")
   # <ia|jk>
@@ -1137,7 +1004,7 @@ function calc_pertT(EC::ECInfo, T1, T2; save_t3=false)
   Enb3 = 0.0
   IntX = zeros(nvir,nocc)
   if save_t3
-    t3file, T3 = newmmap(EC,"T3abcijk",Float64,(nvir,nvir,nvir,uppertriangular(nocc,nocc,nocc)))
+    t3file, T3 = newmmap(EC,"T_vvvooo",Float64,(nvir,nvir,nvir,uppertriangular(nocc,nocc,nocc)))
   end
   for k = 1:nocc 
     for j = 1:k
@@ -1203,7 +1070,7 @@ end
 
   Calculate UCCSD or UDCSD residual.
 """
-function calc_ccsd_resid(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc)
+function calc_ccsd_resid(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab; dc = false, tworef = false, fixref = false)
   t1 = time_ns()
   SP = EC.space
   nocc = n_occ_orbs(EC)
@@ -1213,26 +1080,26 @@ function calc_ccsd_resid(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc)
   norb = n_orbs(EC)
   linearized::Bool = false
   if ndims(T1a) == 2
+    if !EC.options.cc.use_kext
+      error("open-shell CCSD only implemented with kext")
+    end
     calc_dressed_ints(EC,T1a,T1b)
     t1 = print_time(EC,t1,"dressing",2)
   else
     pseudo_dressed_ints(EC,true)
   end
 
-  if length(T1a) > 0
-    R1a = Float64[]
-  else
-    R1a = nothing
-  end
-  if length(T1b) > 0
-    R1b = Float64[]
-  else
-    R1b = nothing
+  if tworef
+    morba, norbb, morbb, norba = active_orbitals(EC)
+    T2ab[norba,morbb,morba,norbb] = 0
   end
 
+  R1a = Float64[]
+  R1b = Float64[]
 
-  dfock = load(EC,"dfock"*'o')
-  dfockb = load(EC,"dfock"*'O')
+  dfock = load(EC,"df_mm")
+  dfockb = load(EC,"df_MM")
+
   fij = dfock[SP['o'],SP['o']]
   fab = dfock[SP['v'],SP['v']]
   fIJ = dfockb[SP['O'],SP['O']]
@@ -1240,9 +1107,9 @@ function calc_ccsd_resid(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc)
 
   if length(T1a) > 0
     if EC.options.cc.use_kext
-      dint1a = load(EC,"dint1"*'o')
+      dint1a = load(EC,"dh_mm")
       R1a = dint1a[SP['v'],SP['o']]
-      dint1b = load(EC,"dint1"*'O')
+      dint1b = load(EC,"dh_MM")
       R1b = dint1b[SP['V'],SP['O']]
     else
       fai = dfock[SP['v'],SP['o']]
@@ -1586,112 +1453,302 @@ function calc_ccsd_resid(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc)
     d_VOVO, rR2b = nothing, nothing
   end
 
+  if tworef || fixref
+    # 2D-CC assumes open-shell singlet reference morba and norbb occupied in Φ^A and morbb and norba in Φ^B.
+    @assert length(setdiff(SP['o'],SP['O'])) == 1 && length(setdiff(SP['O'],SP['o'])) == 1 "2D-CCSD needs two open-shell alpha beta orbitals"
+    morba, norbb, morbb, norba = active_orbitals(EC)
+    if tworef
+      activeorbs = (morba, norbb, morbb, norba)
+      occcorea = collect(1:length(SP['o']))
+      occcoreb = collect(1:length(SP['O']))
+      filter!(x -> x != morba, occcorea)
+      filter!(x -> x != norbb, occcoreb)
+      occcore = (occcorea, occcoreb)
+      virtualsa = collect(1:length(SP['v']))
+      virtualsb = collect(1:length(SP['V']))
+      filter!(x -> x != norba, virtualsa)
+      filter!(x -> x != morbb, virtualsb)
+      virtuals = (virtualsa, virtualsb)
+      W = R2ab[norba,morbb,morba,norbb]
+      R2ab[norba,morbb,morba,norbb] = 0.0
+      if length(T1a) > 0
+        M1a = calc_M1a(occcore,virtuals,T1b, T2ab, activeorbs)
+        M1b = calc_M1b(occcore,virtuals,T1a, T2ab, activeorbs)
+        @tensoropt R1a[a,i] += M1a[a,i] * W
+        @tensoropt R1b[a,i] += M1b[a,i] * W
+      end
+      if !isempty(occcorea) && !isempty(occcoreb)
+        M2a = calc_M2a(occcore,virtuals,T1a,T1b,T2b,T2ab, activeorbs)
+        M2b = calc_M2b(occcore,virtuals,T1a,T1b,T2a,T2ab, activeorbs)
+        @tensoropt R2a[a,b,i,j] += M2a[a,b,i,j] * W
+        @tensoropt R2b[a,b,i,j] += M2b[a,b,i,j] * W
+      end
+      M2ab = calc_M2ab(occcore,virtuals,T1a,T1b,T2a,T2b,T2ab, activeorbs)
+      @tensoropt R2ab[a,b,i,j] += M2ab[a,b,i,j] * W
+      save!(EC,"2d_ccsd_W",[W])
+    elseif fixref
+      R2ab[norba,morbb,morba,norbb] = 0
+    end
+  end
   return R1a, R1b, R2a, R2b, R2ab
 end
 
-"""
-    calc_cc(EC::ECInfo, T1, T2, dc = false)
+function active_orbitals(EC::ECInfo)
+  SP = EC.space
+  @assert length(setdiff(SP['o'],SP['O'])) == 1 && length(setdiff(SP['O'],SP['o'])) == 1 "Assumed two open-shell alpha beta orbitals here."
+  morb = setdiff(SP['o'],SP['O'])[1]
+  norb = setdiff(SP['O'],SP['o'])[1]
+  morba = findfirst(isequal(morb),SP['o'])
+  norbb = findfirst(isequal(norb),SP['O'])
+  morbb = findfirst(isequal(morb),SP['V'])
+  norba = findfirst(isequal(norb),SP['v'])
+  return morba,norbb,morbb,norba
+end
 
-Calculate closed-shell coupled cluster amplitudes.
-
-If length(T1) is 0 on input, no singles will be calculated.
-If dc: calculate distinguishable cluster.
-"""
-function calc_cc(EC::ECInfo, T1, T2, dc = false)
-  println(method_name(T1,dc))
-  diis = Diis(EC)
-
-  println("Iter     SqNorm      Energy      DE          Res         Time")
-  NormR1 = 0.0
-  NormT1 = 0.0
-  NormT2 = 0.0
-  R1 = Float64[]
-  Eh = 0.0
-  t0 = time_ns()
-  for it in 1:EC.options.cc.maxit
-    t1 = time_ns()
-    R1, R2 = calc_ccsd_resid(EC,T1,T2,dc)
-    t1 = print_time(EC,t1,"residual",2)
-    NormT2 = calc_doubles_norm(T2)
-    NormR2 = calc_doubles_norm(R2)
-    Eh = calc_hylleraas(EC,T1,T2,R1,R2)
-    T2 += update_doubles(EC,R2)
-    if length(T1) == 0
-      T2, = perform(diis,[T2],[R2])
-      En = 0.0
-    else
-      NormT1 = calc_singles_norm(T1)
-      NormR1 = calc_singles_norm(R1)
-      T1 += update_singles(EC,R1)
-      T1,T2 = perform(diis,[T1,T2],[R1,R2])
-      En1 = calc_singles_energy(EC, T1)
-      En = En1
-    end
-    En2 = calc_doubles_energy(EC,T2)
-    En += En2
-    ΔE = En - Eh  
-    NormR = NormR1 + NormR2
-    NormT = 1.0 + NormT1 + NormT2
-    tt = (time_ns() - t0)/10^9
-    @printf "%3i %12.8f %12.8f %12.8f %10.2e %8.2f \n" it NormT Eh ΔE NormR tt
-    flush(stdout)
-    if NormR < EC.options.cc.thr
-      break
-    end
+function calc_M1a(occcore,virtuals,T1, T2, activeorbs)
+  morba, norbb, morbb, norba = activeorbs
+  occcorea, occcoreb = occcore
+  virtualsa, virtualsb = virtuals
+  M1 = zeros(Float64,size(T1))
+  if !isempty(occcorea) && !isempty(occcoreb)
+    @tensoropt M1[norba,occcorea][i] += T2[norba,morbb,morba,occcoreb][i]
+    @tensoropt M1[virtualsa,occcorea][a,i] += T2[norba,morbb,morba,occcoreb][i] * T1[virtualsb,norbb][a]
+    @tensoropt M1[virtualsa,occcorea][a,i] += T2[norba,virtualsb,morba,norbb][a] * T1[morbb,occcoreb][i]
   end
-  println()
-  @printf "Sq.Norm of T1: %12.8f Sq.Norm of T2: %12.8f \n" NormT1 NormT2
-  println()
-  flush(stdout)
+  @tensoropt M1[virtualsa,morba][a] -= T2[norba,virtualsb,morba,norbb][a]
+  return M1
+end
 
-  return Eh,T1,T2
+function calc_M1b(occcore,virtuals,T1, T2, activeorbs)
+  morba, norbb, morbb, norba = activeorbs
+  occcorea, occcoreb = occcore
+  virtualsa, virtualsb = virtuals
+  M1 = zeros(Float64,size(T1))
+  if !isempty(occcorea) && !isempty(occcoreb)
+    @tensoropt M1[morbb,occcoreb][i] += T2[norba,morbb,occcorea,norbb][i]
+    @tensoropt M1[virtualsb,occcoreb][a,i] += T2[norba,morbb,occcorea,norbb][i] * T1[virtualsa,morba][a]
+    @tensoropt M1[virtualsb,occcoreb][a,i] += T2[virtualsa,morbb,morba,norbb][a] * T1[norba,occcorea][i]
+  end
+  @tensoropt M1[virtualsb,norbb][a] -= T2[virtualsa,morbb,morba,norbb][a]
+  return M1
+end
+
+function calc_M2a(occcore,virtuals,T1a,T1b,T2b,T2ab,activeorbs)
+  morba, norbb, morbb, norba = activeorbs
+  occcorea, occcoreb = occcore
+  virtualsa, virtualsb = virtuals
+  M2 = zeros(Float64,size(T2b))
+  if length(T1a) > 0
+    @tensoropt T1[a,i] := T1a[a,i] - T1b[a,i]
+    @tensoropt T2t[a,b,i,j] := T2b[a,b,i,j] + T1b[a,i] * T1b[b,j]
+
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] -= T2ab[norba,morbb,morba,occcoreb][i] * T1[virtualsa,occcorea][a,j]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] += T2ab[norba,morbb,morba,occcoreb][j] * T1[virtualsa,occcorea][a,i]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] -= T2ab[norba,virtualsb,morba,occcoreb][a,i] * T1b[morbb,occcoreb][j]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] += T2ab[norba,virtualsb,morba,occcoreb][a,j] * T1b[morbb,occcoreb][i]
+
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][a,b,i] += T2ab[norba,virtualsb,morba,norbb][a] * T1[virtualsa,occcorea][b,i]
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][b,a,i] -= T2ab[norba,virtualsb,morba,norbb][a] * T1[virtualsa,occcorea][b,i]
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][a,b,i] += T2ab[norba,virtualsb,morba,occcoreb][a,i] * T1b[virtualsb,norbb][b] 
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][b,a,i] -= T2ab[norba,virtualsb,morba,occcoreb][a,i] * T1b[virtualsb,norbb][b]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2ab[norba,morbb,morba,occcoreb][i] * T1b[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += T2ab[norba,morbb,morba,occcoreb][i] * T1b[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += T2ab[norba,morbb,morba,occcoreb][i] * T1b[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= T2ab[norba,morbb,morba,occcoreb][i] * T1b[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2ab[norba,virtualsb,morba,norbb][a] * T1b[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += T2ab[norba,virtualsb,morba,norbb][a] * T1b[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += T2ab[norba,virtualsb,morba,norbb][a] * T1b[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= T2ab[norba,virtualsb,morba,norbb][a] * T1b[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2t[morbb,virtualsb,norbb,occcoreb][a,i] * T2ab[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += T2t[morbb,virtualsb,norbb,occcoreb][a,i] * T2ab[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += T2t[morbb,virtualsb,norbb,occcoreb][a,i] * T2ab[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= T2t[morbb,virtualsb,norbb,occcoreb][a,i] * T2ab[norba,virtualsb,morba,occcoreb][b,j]
+  end
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2ab[norba,morbb,morba,occcoreb][j] * T2b[virtualsb,virtualsb,norbb,occcoreb][a,b,i]
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += T2ab[norba,morbb,morba,occcoreb][j] * T2b[virtualsb,virtualsb,norbb,occcoreb][a,b,i]
+
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2ab[norba,virtualsb,morba,norbb][b] * T2b[morbb,virtualsb,occcoreb,occcoreb][a,i,j]
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += T2ab[norba,virtualsb,morba,norbb][b] * T2b[morbb,virtualsb,occcoreb,occcoreb][a,i,j]
+
+
+  @tensoropt M2[virtualsa,norba,occcorea,morba][a,i] -= T2ab[norba,virtualsb,morba,occcoreb][a,i]
+  return M2
+end
+
+function calc_M2b(occcore,virtuals,T1a,T1b,T2a,T2ab,activeorbs)
+# morba, norbb, morbb, norba = activeorbs
+  norbb, morba, norba, morbb = activeorbs
+  occcoreb, occcorea = occcore
+  virtualsb, virtualsa = virtuals
+  P12 = (2,1,4,3)
+  M2 = zeros(Float64,size(T2a))
+  if length(T1a) > 0
+    @tensoropt T1[a,i] := T1b[a,i] - T1a[a,i]
+    @tensoropt T2t[a,b,i,j] := T2a[a,b,i,j] + T1a[a,i] * T1a[b,j]
+
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] -= permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][i] * T1[virtualsa,occcorea][a,j]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] += permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][j] * T1[virtualsa,occcorea][a,i]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] -= permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][a,i] * T1a[morbb,occcoreb][j]
+    @tensoropt M2[norba,virtualsa,occcorea,occcorea][a,i,j] += permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][a,j] * T1a[morbb,occcoreb][i]
+
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][a,b,i] += permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1[virtualsa,occcorea][b,i]
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][b,a,i] -= permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1[virtualsa,occcorea][b,i]
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][a,b,i] += permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][a,i] * T1a[virtualsb,norbb][b] 
+    @tensoropt M2[virtualsa,virtualsa,morba,occcorea][b,a,i] -= permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][a,i] * T1a[virtualsb,norbb][b]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][i] * T1a[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][i] * T1a[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][i] * T1a[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][i] * T1a[virtualsb,norbb][a] * T1[virtualsa,occcorea][b,j]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1a[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1a[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1a[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][a] * T1a[morbb,occcoreb][i] * T1[virtualsa,occcorea][b,j]
+
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= T2t[morbb,virtualsb,norbb,occcoreb][a,i] * permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += T2t[morbb,virtualsb,norbb,occcoreb][a,i] * permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += T2t[morbb,virtualsb,norbb,occcoreb][a,i] * permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][b,j]
+    @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,j,i] -= T2t[morbb,virtualsb,norbb,occcoreb][a,i] * permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][b,j]
+  end
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][j] * T2a[virtualsb,virtualsb,norbb,occcoreb][a,b,i]
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,j,i] += permutedims(T2ab,P12)[norba,morbb,morba,occcoreb][j] * T2a[virtualsb,virtualsb,norbb,occcoreb][a,b,i]
+
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][a,b,i,j] -= permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][b] * T2a[morbb,virtualsb,occcoreb,occcoreb][a,i,j]
+  @tensoropt M2[virtualsa,virtualsa,occcorea,occcorea][b,a,i,j] += permutedims(T2ab,P12)[norba,virtualsb,morba,norbb][b] * T2a[morbb,virtualsb,occcoreb,occcoreb][a,i,j]
+
+  @tensoropt M2[virtualsa,norba,occcorea,morba][a,i] -= permutedims(T2ab,P12)[norba,virtualsb,morba,occcoreb][a,i]
+  return M2
+end
+
+function calc_M2ab(occcore,virtuals,T1a,T1b,T2a,T2b,T2ab,activeorbs)
+  morba, norbb, morbb, norba = activeorbs
+  occcorea, occcoreb = occcore
+  virtualsa, virtualsb = virtuals
+  M2 = zeros(Float64,size(T2ab))
+
+  if length(T1a) > 0
+    @tensoropt T1[a,i] := T1a[a,i] - T1b[a,i]
+    @tensoropt T2ta[a,b,i,j] := T2a[a,b,i,j] + T1a[a,i] * T1a[b,j]
+    @tensoropt T2tb[a,b,i,j] := T2b[a,b,i,j] + T1b[a,i] * T1b[b,j]
+    @tensoropt T2tab[a,b,i,j] := T2ab[a,b,i,j] + T1a[a,i] * T1b[b,j]
+    if !isempty(occcorea) && !isempty(occcoreb)
+      @tensoropt M2[norba,virtualsb,occcorea,occcoreb][a,i,j] -= T2ab[norba,morbb,morba,occcoreb][i] * T1[virtualsb,occcoreb][a,j]
+      @tensoropt M2[virtualsa,morbb,occcorea,occcoreb][a,j,i] += T2ab[norba,morbb,occcorea,norbb][i] * T1[virtualsa,occcorea][a,j]
+      @tensoropt M2[norba,virtualsb,occcorea,occcoreb][a,i,j] -= T2ab[virtualsa,morbb,morba,occcoreb][a,i] * T1a[norba,occcorea][j]
+      @tensoropt M2[virtualsa,morbb,occcorea,occcoreb][a,j,i] -= T2ab[norba,virtualsb,occcorea,norbb][a,i] * T1b[morbb,occcoreb][j]
+      @tensoropt M2[norba,virtualsb,occcorea,occcoreb][a,i,j] -= T2tab[norba,morbb,occcorea,occcoreb][j,i] * T1a[virtualsa,morba][a]
+      @tensoropt M2[virtualsa,morbb,occcorea,occcoreb][a,j,i] -= T2tab[norba,morbb,occcorea,occcoreb][i,j] * T1b[virtualsb,norbb][a]
+
+      @tensoropt M2[virtualsa,virtualsb,morba,occcoreb][a,b,i] += T2ab[norba,virtualsb,morba,norbb][a] * T1[virtualsb,occcoreb][b,i]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,norbb][b,a,i] -= T2ab[virtualsa,morbb,morba,norbb][a] * T1[virtualsa,occcorea][b,i]
+      @tensoropt M2[virtualsa,virtualsb,morba,occcoreb][a,b,i] += T2ab[norba,virtualsb,occcorea,norbb][a,i] * T1a[virtualsa,morba][b] 
+      @tensoropt M2[virtualsa,virtualsb,occcorea,norbb][b,a,i] += T2ab[virtualsa,morbb,morba,occcoreb][a,i] * T1b[virtualsb,norbb][b] 
+      @tensoropt M2[virtualsa,virtualsb,morba,occcoreb][a,b,i] += T2tab[virtualsa,virtualsb,morba,norbb][b,a] * T1a[norba,occcorea][i]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,norbb][b,a,i] += T2tab[virtualsa,virtualsb,morba,norbb][a,b] * T1b[morbb,occcoreb][i] 
+
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[norba,morbb,morba,occcoreb][i] * T1b[virtualsb,norbb][a] * T1[virtualsb,occcoreb][b,j]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][b,a,j,i] += T2ab[norba,morbb,occcorea,norbb][i] * T1a[virtualsa,morba][a] * T1[virtualsa,occcorea][b,j]
+
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[norba,virtualsb,morba,norbb][a] * T1b[morbb,occcoreb][i] * T1[virtualsb,occcoreb][b,j]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][b,a,j,i] += T2ab[virtualsa,morbb,morba,norbb][a] * T1a[norba,occcorea][i] * T1[virtualsa,occcorea][b,j]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2a[norba,virtualsa,morba,occcorea][b,j] * T1b[virtualsb,norbb][a] * T1b[morbb,occcoreb][i]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2b[morbb,virtualsb,norbb,occcoreb][a,i] * T1a[norba,occcorea][j] * T1a[virtualsa,morba][b]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[virtualsa,morbb,morba,occcoreb][b,i] * T1a[norba,occcorea][j] * T1b[virtualsb,norbb][a]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[norba,virtualsb,occcorea,norbb][a,j] * T1a[virtualsa,morba][b] * T1b[morbb,occcoreb][i]
+      @tensoropt M2[norba,morbb,morba,occcoreb][i] += T1a[norba,occcorea][i]
+      @tensoropt M2[norba,morbb,occcorea,norbb][i] += T1b[morbb,occcoreb][i]
+      @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2tab[norba,morbb,occcorea,occcoreb][i,j] * T2tab[virtualsa,virtualsb,morba,norbb][a,b]
+      @tensoropt M2[norba,morbb,occcorea,occcoreb][i,j] -= T2tab[norba,morbb,occcorea,occcoreb][j,i]
+      @tensoropt M2[norba,virtualsb,morba,occcoreb][a,i] += T2ta[norba,virtualsa,occcorea,morba][a,i]
+      @tensoropt M2[virtualsa,morbb,occcorea,norbb][a,i] += T2tb[morbb,virtualsb,occcoreb,norbb][a,i]
+      @tensoropt M2[virtualsa,morbb,morba,occcoreb][a,i] += T2tab[norba,virtualsb,occcorea,norbb][a,i]
+      @tensoropt M2[norba,virtualsb,occcorea,norbb][a,i] += T2tab[virtualsa,morbb,morba,occcoreb][a,i]
+    end
+    @tensoropt M2[norba,virtualsb,morba,norbb][a] -= T1a[virtualsa,morba][a]
+    @tensoropt M2[virtualsa,morbb,morba,norbb][a] -= T1b[virtualsb,norbb][a]
+    @tensoropt M2[virtualsa,virtualsb,morba,norbb][a,b] -= T2tab[virtualsa,virtualsb,morba,norbb][b,a]
+  end
+  if !isempty(occcorea) && !isempty(occcoreb)
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2ab[norba,morbb,occcorea,norbb][j] * T2ab[virtualsa,virtualsb,morba,occcoreb][b,a,i]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2ab[norba,morbb,morba,occcoreb][i] * T2ab[virtualsa,virtualsb,occcorea,norbb][b,a,j]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2ab[virtualsa,morbb,morba,norbb][b] * T2ab[norba,virtualsb,occcorea,occcoreb][a,j,i]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2ab[norba,virtualsb,morba,norbb][a] * T2ab[virtualsa,morbb,occcorea,occcoreb][b,j,i]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] += T2b[morbb,virtualsb,occcoreb,norbb][a,i] * T2a[norba,virtualsa,morba,occcorea][b,j]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[norba,virtualsb,morba,occcoreb][a,i] * T2ab[virtualsa,morbb,occcorea,norbb][b,j]
+    @tensoropt M2[virtualsa,virtualsb,occcorea,occcoreb][a,b,i,j] -= T2ab[norba,virtualsb,occcorea,norbb][a,j] * T2ab[virtualsa,morbb,morba,occcoreb][b,i]
+  end
+  return M2
 end
 
 """
-    calc_cc(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc = false)
+    calc_cc(EC::ECInfo, method::ECMethod)
 
-  Calculate unrestricted coupled cluster amplitudes.
+  Calculate coupled cluster amplitudes.
 
-  If length(T1a) && length(T1b) are 0 on input, no singles will be calculated.
-  If dc: calculate distinguishable cluster.
+  Exact specification of the method is given by `method`.
 """
-function calc_cc(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc = false)
-  println(method_name(T1a,dc))
+function calc_cc(EC::ECInfo, method::ECMethod)
+  dc = (method.theory == "DC" || last(method.theory,2) == "DC")
+  tworef = method.theory[1:2] == "2D"
+  fixref = method.theory[1:2] == "FR"
+  print_info(method_name(method))
+  Amps, exc_ranges = starting_amplitudes(EC, method)
+  singles, doubles, triples = exc_ranges[1:3]
+  if method.unrestricted
+    @assert (length(singles) == 2) && (length(doubles) == 3) && (length(triples) == 4)
+  else
+    @assert (length(singles) == 1) && (length(doubles) == 1) && (length(triples) == 1)
+  end
+  T2αβ = last(doubles)
   diis = Diis(EC)
 
-  println("Iter     SqNorm      Energy      DE          Res         Time")
   NormR1 = 0.0
   NormT1 = 0.0
   NormT2 = 0.0
-  R1a = Float64[]
-  R1b = Float64[]
-  nosing = (length(T1a) == 0) && (length(T1b) == 0)  
+  do_sing = (method.exclevel[1] == :full)
   Eh = 0.0
+  En1 = 0.0
+  converged = false
   t0 = time_ns()
+  println("Iter     SqNorm      Energy      DE          Res         Time")
   for it in 1:EC.options.cc.maxit
     t1 = time_ns()
-    R1a, R1b, R2a, R2b, R2ab = calc_ccsd_resid(EC,T1a,T1b,T2a,T2b,T2ab,dc)
-    t1 = print_time(EC,t1,"residual",2)
-    NormT2 = calc_doubles_norm(T2a,T2b,T2ab)
-    NormR2 = calc_doubles_norm(R2a,R2b,R2ab)
-    Eh = calc_hylleraas(EC,T1a,T1b,T2a,T2b,T2ab,R1a,R1b,R2a,R2b,R2ab)
-    T2a += update_doubles(EC,R2a)
-    T2b += update_doubles(EC,R2b;spincase=:β)
-    T2ab += update_doubles(EC,R2ab;spincase=:αβ)
-    if nosing
-      T2a,T2b,T2ab = perform(diis,[T2a,T2b,T2ab],[R2a,R2b,2.0*R2ab])
-      En = 0.0
-    else
-      NormT1 = calc_singles_norm(T1a, T1b)
-      NormR1 = calc_singles_norm(R1a, R1b)
-      T1a += update_singles(EC,R1a;spincase=:α)
-      T1b += update_singles(EC,R1b;spincase=:β)
-      T1a,T1b,T2a,T2b,T2ab = perform(diis,[T1a,T1b,T2a,T2b,T2ab],[R1a,R1b,R2a,R2b,2.0*R2ab])
-      En1 = calc_singles_energy(EC, T1a, T1b)
-      En = En1
+    Res = calc_ccsd_resid(EC, Amps...; dc, tworef, fixref)
+    t1 = print_time(EC, t1, "residual", 2)
+    NormT2 = calc_doubles_norm(Amps[doubles]...)
+    NormR2 = calc_doubles_norm(Res[doubles]...)
+    Eh = calc_hylleraas(EC, Amps..., Res...)
+    update_doubles!(EC, Amps[doubles]..., Res[doubles]...)
+    if length(method.theory) > 2 && uppercase(method.theory[1:3]) == "FRS"
+      morba, norbb, morbb, norba = active_orbitals(EC)
+      Amps[T2αβ][norba,morbb,morba,norbb] = 1.0
+    elseif length(method.theory) > 2 && uppercase(method.theory[1:3]) == "FRT"
+      morba, norbb, morbb, norba = active_orbitals(EC)
+      Amps[T2αβ][norba,morbb,morba,norbb] = -1.0
+    elseif uppercase(method.theory[1:2]) == "2D"
+      morba, norbb, morbb, norba = active_orbitals(EC)
+      # println("T1a all internal: ", T1a[norba,morba])
+      # println("T1b all internal: ", T1b[morbb,norbb])
+      # T1a[norba,morba] = 0.0
+      # T1b[morbb,norbb] = 0.0
     end
-    En2 = calc_doubles_energy(EC,T2a,T2b,T2ab)
-    En += En2
+    if do_sing
+      NormT1 = calc_singles_norm(Amps[singles]...)
+      NormR1 = calc_singles_norm(Res[singles]...)
+      update_singles!(EC, Amps[singles]..., Res[singles]...)
+    end
+    Amps = perform(diis, Amps, Res)
+    if do_sing
+      save_current_singles(EC, Amps[singles]...)
+      En1 = calc_singles_energy(EC, Amps[singles]...)
+    end
+    save_current_doubles(EC, Amps[doubles]...)
+    En2 = calc_doubles_energy(EC, Amps[doubles]...)
+    En = En1 + En2
     ΔE = En - Eh  
     NormR = NormR1 + NormR2
     NormT = 1.0 + NormT1 + NormT2
@@ -1699,37 +1756,47 @@ function calc_cc(EC::ECInfo, T1a, T1b, T2a, T2b, T2ab, dc = false)
     @printf "%3i %12.8f %12.8f %12.8f %10.2e %8.2f \n" it NormT Eh ΔE NormR tt
     flush(stdout)
     if NormR < EC.options.cc.thr
+      converged = true
       break
     end
   end
+  if !converged
+    println("WARNING: CC iterations did not converge!")
+  end
+  if do_sing
+    try2save_singles!(EC, Amps[singles]...)
+  end
+  try2save_doubles!(EC, Amps[doubles]...)
   println()
   @printf "Sq.Norm of T1: %12.8f Sq.Norm of T2: %12.8f \n" NormT1 NormT2
   println()
   flush(stdout)
-  return Eh, T1a, T1b, T2a, T2b, T2ab
+  return Eh
 end
 
 """ 
-    calc_ccsdt(EC::ECInfo, T1, T2, useT3 = false, cc3 = false)
+    calc_ccsdt(EC::ECInfo, useT3 = false, cc3 = false)
 
   Calculate decomposed closed-shell DC-CCSDT amplitudes.
 
   If `useT3`: (T) amplitudes from a preceding calculations will be used as starting guess.
   If cc3: calculate CC3 amplitudes.
 """
-function calc_ccsdt(EC::ECInfo, T1, T2, useT3 = false, cc3 = false)
+function calc_ccsdt(EC::ECInfo, useT3 = false, cc3 = false)
+  if cc3
+    print_info("CC3")
+  else
+    print_info("DC-CCSDT")
+  end
   calc_integrals_decomposition(EC)
+  T1 = read_starting_guess4amplitudes(EC, 1)
+  T2 = read_starting_guess4amplitudes(EC, 2)
   if useT3
     calc_triples_decomposition(EC)
   else
     # calc_dressed_3idx(EC,zeros(size(T1)))
-    calc_dressed_3idx(EC,T1)
-    calc_triples_decomposition_without_triples(EC,T2)
-  end
-  if cc3
-    println("CC3")
-  else
-    println("DC-CCSDT")
+    calc_dressed_3idx(EC, T1)
+    calc_triples_decomposition_without_triples(EC, T2)
   end
   diis = Diis(EC)
 
@@ -1744,31 +1811,31 @@ function calc_ccsdt(EC::ECInfo, T1, T2, useT3 = false, cc3 = false)
   for it in 1:EC.options.cc.maxit
     t1 = time_ns()
     #get dressed integrals
-    calc_dressed_3idx(EC,T1)
+    calc_dressed_3idx(EC, T1)
     # test_dressed_ints(EC,T1) #DEBUG
-    t1 = print_time(EC,t1,"dressed 3-idx integrals",2)
-    R1, R2 = calc_ccsd_resid(EC,T1,T2,false)
-    t1 = print_time(EC,t1,"ccsd residual",2)
-    R1, R2 = add_to_singles_and_doubles_residuals(EC,R1,R2)
-    t1 = print_time(EC,t1,"R1(T3) and R2(T3)",2)
+    t1 = print_time(EC, t1, "dressed 3-idx integrals", 2)
+    R1, R2 = calc_ccsd_resid(EC, T1, T2)
+    t1 = print_time(EC, t1, "ccsd residual", 2)
+    R1, R2 = add_to_singles_and_doubles_residuals(EC, R1, R2)
+    t1 = print_time(EC, t1, "R1(T3) and R2(T3)", 2)
     calc_triples_residuals(EC, T1, T2, cc3)
-    t1 = print_time(EC,t1,"R3",2)
+    t1 = print_time(EC, t1, "R3", 2)
     NormT1 = calc_singles_norm(T1)
     NormT2 = calc_doubles_norm(T2)
-    T3 = load(EC,"T3_XYZ")
-    NormT3 = calc_triples_norm(T3)
+    T3 = load(EC, "T_XXX")
+    NormT3 = calc_deco_triples_norm(T3)
     NormR1 = calc_singles_norm(R1)
     NormR2 = calc_doubles_norm(R2)
-    R3 = load(EC,"R3_decomp")
-    NormR3 = calc_triples_norm(R3)
-    Eh = calc_hylleraas(EC,T1,T2,R1,R2)
-    T1 += update_singles(EC,R1)
-    T2 += update_doubles(EC,R2)
-    T3 += update_triples(EC,R3)
-    T1,T2,T3 = perform(diis,[T1,T2,T3],[R1,R2,R3])
-    save(EC,"T3_XYZ",T3)
+    R3 = load(EC, "R_XXX")
+    NormR3 = calc_deco_triples_norm(R3)
+    Eh = calc_hylleraas(EC, T1, T2, R1, R2)
+    T1 += update_singles(EC, R1)
+    T2 += update_doubles(EC, R2)
+    T3 += update_deco_triples(EC, R3)
+    T1, T2, T3 = perform(diis, [T1,T2,T3], [R1,R2,R3])
+    save!(EC, "T_XXX", T3)
     En = calc_singles_energy(EC, T1)
-    En += calc_doubles_energy(EC,T2)
+    En += calc_doubles_energy(EC, T2)
     ΔE = En - Eh
     NormR = NormR1 + NormR2 + NormR3
     NormT = 1.0 + NormT1 + NormT2 + NormT3
@@ -1784,33 +1851,7 @@ function calc_ccsdt(EC::ECInfo, T1, T2, useT3 = false, cc3 = false)
   println()
   flush(stdout)
   
-  return Eh,T1,T2
-end
-
-"""
-    update_triples(EC,R3, use_shift = true)
-
-  Update decomposed triples amplitudes.
-"""
-function update_triples(EC,R3, use_shift = true)
-  shift = use_shift ? EC.options.cc.shiftt : 0.0
-  ΔT3 = deepcopy(R3)
-  ϵX = load(EC,"epsilonX")
-  for I ∈ CartesianIndices(ΔT3)
-    X,Y,Z = Tuple(I)
-    ΔT3[I] /= (ϵX[X] + ϵX[Y] + ϵX[Z] + shift)
-  end
-  return ΔT3
-end
-
-"""
-    calc_triples_norm(T3)
-
-  Calculate a *simple* norm of triples (without contravariant!)
-"""
-function calc_triples_norm(T3)
-  @tensoropt NormT3 = T3[X,Y,Z] * T3[X,Y,Z]
-  return NormT3
+  return Eh
 end
 
 """
@@ -1820,11 +1861,11 @@ end
 """
 function add_to_singles_and_doubles_residuals(EC,R1,R2)
   SP = EC.space
-  ooPfile, ooP = mmap(EC,"d_ooP")
-  ovPfile, ovP = mmap(EC,"d_ovP")
-  Txyz = load(EC,"T3_XYZ")
+  ooPfile, ooP = mmap(EC, "d_ooL")
+  ovPfile, ovP = mmap(EC, "d_ovL")
+  Txyz = load(EC, "T_XXX")
   
-  U = load(EC,"UvoX")
+  U = load(EC, "C_voX")
   # println(size(U))
 
   @tensoropt Boo[i,j,P,X] := ovP[i,a,P] * U[a,j,X]
@@ -1836,12 +1877,12 @@ function add_to_singles_and_doubles_residuals(EC,R1,R2)
   BBU = nothing
 
   @tensoropt Bov[i,a,P,X] := ooP[j,i,P] * U[a,j,X]
-  vvPfile, vvP = mmap(EC,"d_vvP")
+  vvPfile, vvP = mmap(EC, "d_vvL")
   @tensoropt Bvo[a,i,P,X] := vvP[a,b,P] * U[b,i,X]
   close(vvPfile)
   vvP = nothing
-  dfock = load(EC,"dfock"*'o')
-  fov = dfock[SP['o'],SP['v']]
+  dfock = load(EC, "df_mm")
+  fov = dfock[SP['o'], SP['v']]
   # R2[abij] = RR2[abij] + RR2[baji]  
   @tensoropt RR2[a,b,i,j] := U[a,i,X] * (U[b,j,Y] * (Txyz[X,Y,Z] * (fov[k,c]*U[c,k,Z])) - (Txyz[X,Y,Z] * U[b,k,Z])* (fov[k,c]*U[c,j,Y]))
   @tensoropt RR2[a,b,i,j] += 2.0*U[b,j,Y] * ((Bvo[a,i,P,Z] - Bov[i,a,P,Z])*(Txyz[X,Y,Z] * A[P,X]))
@@ -1854,120 +1895,6 @@ function add_to_singles_and_doubles_residuals(EC,R1,R2)
   return R1,R2
 end
 
-"""
-    calc_integrals_decomposition(EC::ECInfo)
-
-  Decompose (pq|rs) as (pq|P)(P|rs) and store as `pqP`.
-"""
-function calc_integrals_decomposition(EC::ECInfo)
-  pqrs = permutedims(ints2(EC,"::::",:α),(1,3,2,4))
-  n = size(pqrs,1)
-  B, S, Bt = svd(reshape(pqrs, (n^2,n^2)))
-  # display(S)
-  pqrs = nothing
-
-  naux1 = 0
-  for s in S
-    if s > EC.options.cholesky.thr
-      naux1 += 1
-    else
-      break
-    end
-  end
-  #println(naux1)
-  
-  #get integral decomposition
-  pqP = B[:,1:naux1].*sqrt.(S[1:naux1]')
-  save(EC, "pqP", reshape(pqP, (n,n,naux1)))
-  #B_comparison = pqP * pqP'
-  #println( B_comparison ≈ reshape(pqrs, (n^2,n^2)) )
-end
-
-"""
-    eigen_decompose(T2mat, nvirt, nocc, tol = 1e-6)
-
-  Eigenvector-decompose symmetric doubles T2[ai,bj] matrix: 
-  T^ij_ab = U^iX_a * S_XY * U^jY_b δ_XY.
-  Return U^iX_a for S > tol
-"""
-function eigen_decompose(T2mat, nvirt, nocc, tol = 1e-6)
-  Sval, U = eigen(Symmetric(-T2mat))
-  naux = 0
-  for s in Sval
-    if -s < tol
-      break
-    end
-    naux += 1
-  end
-  # display(Sval[1:naux])
-  # println(naux)
-  return reshape(U[:,1:naux], (nvirt,nocc,naux))
-end
-
-"""
-    svd_decompose(Amat, nvirt, nocc, tol = 1e-6)
-
-  SVD-decompose A as U^iX_a * S * Vt.
-  Return U^iX_a for S > tol
-"""
-function svd_decompose(Amat, nvirt, nocc, tol = 1e-6)
-  U, S, = svd(Amat)
-  # display(S)
-  naux = 0
-  for s in S
-    if s > tol
-      naux += 1
-    else
-      break
-    end
-  end
-  # display(S[1:naux])
-  println("SVD-basis size: ",naux)
-  return reshape(U[:,1:naux], (nvirt,nocc,naux))
-end
-
-"""
-    iter_svd_decompose(Amat, nvirt, nocc, naux)
-
-  Iteratively decompose A as U^iX_a * S * Vt.
-  Return U^iX_a for first naux S
-"""
-function iter_svd_decompose(Amat, nvirt, nocc, naux)
-  # U, S2, Vt = tsvd(Amat, naux )
-  # UaiX = reshape(U[:,1:naux], (nvirt,nocc,naux))
-  # U = nothing
-  # S2 = nothing
-  # Vt = nothing
-  S2, L = svdl(Amat, nsv = naux )
-  # display(S2[1:naux])
-  return reshape(L.P[:,1:naux], (nvirt,nocc,naux))
-  # display(UaiX)
-end
-
-""" 
-    rotate_U2pseudocanonical(EC::ECInfo, UaiX)
-
-  Diagonalize ϵv - ϵo transformed with UaiX (for update).
-  Return eigenvalues and rotated UaiX
-"""
-function rotate_U2pseudocanonical(EC::ECInfo, UaiX)
-  SP = EC.space
-  nocc = n_occ_orbs(EC)
-  nvirt = n_virt_orbs(EC)
-  UaiX2 = deepcopy(UaiX)
-  ϵo, ϵv = orbital_energies(EC)
-  for a in 1:nvirt
-    for i in 1:nocc
-      UaiX2[a,i,:] *= ϵv[a] - ϵo[i]
-    end
-  end
-
-  @tensoropt Fdiff[X,Y] := UaiX[a,i,X] * UaiX2[a,i,Y]
-  diagFdiff = eigen(Symmetric(Fdiff))
-
-  @tensoropt UaiX2[a,i,Y] = diagFdiff.vectors[X,Y] * UaiX[a,i,X]
-  return diagFdiff.values, UaiX2
-end
 
 """
     calc_triples_decomposition_without_triples(EC::ECInfo, T2)
@@ -1984,18 +1911,19 @@ function calc_triples_decomposition_without_triples(EC::ECInfo, T2)
 
   # first approx for U^iX_a from doubles decomposition
   tol2 = EC.options.cc.ampsvdtol*0.01
-  UaiX = svd_decompose(reshape(permutedims(T2,(1,3,2,4)), (nocc*nvirt, nocc*nvirt)), nvirt, nocc, tol2)
+  UaiX = svd_decompose(reshape(permutedims(T2, (1,3,2,4)), (nocc*nvirt, nocc*nvirt)), nvirt, nocc, tol2)
   ϵX,UaiX = rotate_U2pseudocanonical(EC, UaiX)
   D2 = calc_4idx_T3T3_XY(EC, T2, UaiX, ϵX) 
+  # use tol^2 because D2 = (T3)^2
   UaiX = svd_decompose(reshape(D2, (nocc*nvirt, nocc*nvirt)), nvirt, nocc, EC.options.cc.ampsvdtol^2)
   # UaiX = eigen_decompose(reshape(D2, (nocc*nvirt, nocc*nvirt)), nvirt, nocc, EC.options.cc.ampsvdtol^2)
   ϵX,UaiX = rotate_U2pseudocanonical(EC, UaiX)
-  save(EC, "epsilonX", ϵX)
+  save!(EC, "e_X", ϵX)
   #display(UaiX)
   naux = length(ϵX)
-  save(EC,"UvoX",UaiX)
+  save!(EC,"C_voX",UaiX)
   # TODO: calc starting guess for T3_XYZ from T2 and UvoX
-  save(EC,"T3_XYZ",zeros(naux,naux,naux))
+  save!(EC,"T_XXX",zeros(naux, naux, naux))
 end
 
 """
@@ -2009,8 +1937,8 @@ function calc_triples_decomposition(EC::ECInfo)
   nocc = n_occ_orbs(EC)
   nvirt = n_virt_orbs(EC)
 
-  Triples_Amplitudes = zeros(nvirt,nocc,nvirt,nocc,nvirt,nocc)
-  t3file, T3 = mmap(EC, "T3abcijk")
+  Triples_Amplitudes = zeros(nvirt, nocc, nvirt, nocc, nvirt, nocc)
+  t3file, T3 = mmap(EC, "T_vvvooo")
   trippp = [CartesianIndex(i,j,k) for k in 1:nocc for j in 1:k for i in 1:j]
   for ijk in axes(T3,4)
     i,j,k = Tuple(trippp[ijk])                                            #trippp is giving the indices according to the joint index ijk as a tuple
@@ -2029,14 +1957,14 @@ function calc_triples_decomposition(EC::ECInfo)
     UaiX = iter_svd_decompose(reshape(Triples_Amplitudes, (nocc*nvirt, nocc*nocc*nvirt*nvirt)), nvirt, nocc, naux)
   end
   ϵX,UaiX = rotate_U2pseudocanonical(EC, UaiX)
-  save(EC, "epsilonX", ϵX)
+  save!(EC, "e_X", ϵX)
   #display(UaiX)
-  save(EC,"UvoX",UaiX)
+  save!(EC,"C_voX",UaiX)
 
   @tensoropt begin
     T3_decomp_starting_guess[X,Y,Z] := (((Triples_Amplitudes[a,i,b,j,c,k] * UaiX[a,i,X]) * UaiX[b,j,Y]) * UaiX[c,k,Z])
   end
-  save(EC,"T3_XYZ",T3_decomp_starting_guess)
+  save!(EC,"T_XXX",T3_decomp_starting_guess)
   #display(T3_decomp_starting_guess)
 
   # @tensoropt begin
@@ -2048,13 +1976,13 @@ end
 """
     calc_4idx_T3T3_XY(EC::ECInfo, T2, UvoX, ϵX)
 
-  Calculate D^{ij}_{ab} = T^i_{aXY} T^j_{bXY} using half-decomposed perturbative triple amplitudes 
+  Calculate D^{ij}_{ab} = T^i_{aXY} T^j_{bXY} using half-decomposed imaginary-shifted perturbative triple amplitudes 
   T^i_{aXY} from T2 (and UvoX)
 """
 function calc_4idx_T3T3_XY(EC::ECInfo, T2, UvoX, ϵX)
-  voPfile, voP = mmap(EC,"d_voP")
-  ooPfile, ooP = mmap(EC,"d_ooP")
-  vvPfile, vvP = mmap(EC,"d_vvP")
+  voPfile, voP = mmap(EC, "d_voL")
+  ooPfile, ooP = mmap(EC, "d_ooL")
+  vvPfile, vvP = mmap(EC, "d_vvL")
 
   @tensoropt TXai[X,a,i] := UvoX[b,j,X] * T2[a,b,i,j]
   @tensoropt dU[P,X] := voP[c,k,P] * UvoX[c,k,X]
@@ -2077,9 +2005,19 @@ function calc_4idx_T3T3_XY(EC::ECInfo, T2, UvoX, ϵX)
   close(ooPfile)
   close(vvPfile)
   ϵo, ϵv = orbital_energies(EC)
-  for I ∈ CartesianIndices(R)
-    X,Y,a,i = Tuple(I)
-    R[I] /= -(ϵX[X] + ϵX[Y] + ϵv[a] - ϵo[i])
+  shifti = EC.options.cc.deco_ishiftt
+  if shifti > 1.e-10
+    # imaginary-shifted triples
+    for I ∈ CartesianIndices(R)
+      X,Y,a,i = Tuple(I)
+      den = ϵX[X] + ϵX[Y] + ϵv[a] - ϵo[i]
+      R[I] *= -den/(den^2 + shifti)
+    end
+  else
+    for I ∈ CartesianIndices(R)
+      X,Y,a,i = Tuple(I)
+      R[I] /= -(ϵX[X] + ϵX[Y] + ϵv[a] - ϵo[i])
+    end
   end
   nocc = n_occ_orbs(EC)
   naux = length(ϵX)
@@ -2117,53 +2055,53 @@ end
 """
 function calc_triples_residuals(EC::ECInfo, T1, T2, cc3 = false)
   t1 = time_ns()
-  UvoX = load(EC,"UvoX")
+  UvoX = load(EC, "C_voX")
   #display(UvoX)
 
   #load decomposed amplitudes
-  T3_XYZ = load(EC, "T3_XYZ")
+  T3_XYZ = load(EC, "T_XXX")
   #display(T3_XYZ)
 
   #load df coeff
-  ovPfile, ovP = mmap(EC,"d_ovP")
-  voPfile, voP = mmap(EC,"d_voP")
-  ooPfile, ooP = mmap(EC,"d_ooP")
-  vvPfile, vvP = mmap(EC,"d_vvP")
+  ovPfile, ovP = mmap(EC, "d_ovL")
+  voPfile, voP = mmap(EC, "d_voL")
+  ooPfile, ooP = mmap(EC, "d_ooL")
+  vvPfile, vvP = mmap(EC, "d_vvL")
 
   #load dressed fock matrices
   SP = EC.space
-  dfock = load(EC,"dfock"*'o')    
-  dfoo = dfock[SP['o'],SP['o']]
-  dfov = dfock[SP['o'],SP['v']]
-  dfvv = dfock[SP['v'],SP['v']]
+  dfock = load(EC, "df_mm")    
+  dfoo = dfock[SP['o'], SP['o']]
+  dfov = dfock[SP['o'], SP['v']]
+  dfvv = dfock[SP['v'], SP['v']]
   
   @tensoropt Thetavirt[b,d,Z] := vvP[b,d,Q] * (voP[c,k,Q] * UvoX[c,k,Z]) #virt1
   @tensoropt Thetavirt[b,d,Z] += UvoX[c,k,Z] * (T2[c,b,l,m] * (ooP[l,k,Q] * ovP[m,d,Q])) #virt3
   @tensoropt Thetavirt[b,d,Z] -= ovP[l,d,Q] * (T2[b,e,l,k] * (UvoX[c,k,Z] * vvP[c,e,Q])) #virt6
-  t1 = print_time(EC,t1,"1 Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "1 Theta terms in R3(T3)", 2)
   
   @tensoropt Thetaocc[l,j,Z] := ooP[l,j,Q] * (voP[c,k,Q] * UvoX[c,k,Z]) #occ1
   @tensoropt Thetaocc[l,j,Z] -= UvoX[c,k,Z] * (T2[c,d,m,j] * (ovP[l,d,Q] * ooP[m,k,Q])) #occ4
   @tensoropt Thetaocc[l,j,Z] += UvoX[c,k,Z] * (T2[d,e,k,j]* (ovP[l,e,Q] * vvP[c,d,Q])) #occ5
-  t1 = print_time(EC,t1,"2 Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "2 Theta terms in R3(T3)", 2)
   if !cc3
     @tensoropt BooQX[i,j,Q,X] := ovP[i,a,Q] * UvoX[a,j,X]
     @tensoropt Thetavirt[b,d,Z] += 0.5* T3_XYZ[X',Y',Z] * (UvoX[b,m,Y'] * (ovP[l,d,Q] * BooQX[m,l,Q,X'])) #virt9
     @tensoropt Thetaocc[l,j,Z] -= 0.5 * T3_XYZ[X',Z,Z'] * (BooQX[l,m,Q,X'] * BooQX[m,j,Q,Z']) #occ8
     BooQX = nothing
-    t1 = print_time(EC,t1,"3 Theta terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "3 Theta terms in R3(T3)", 2)
 
     @tensoropt A[Q,X] := ovP[i,a,Q] * UvoX[a,i,X]
     @tensoropt Thetavirt[b,d,Z] -= ovP[l,d,Q] * (UvoX[b,l,Z'] * (T3_XYZ[X',Z,Z'] * A[Q,X'])) #virt7
     @tensoropt Thetaocc[l,j,Z] += ovP[l,d,Q] * (UvoX[d,j,Z']* (T3_XYZ[X',Z,Z'] * A[Q,X']))   #occ6
     A = nothing
-    t1 = print_time(EC,t1,"4 Theta terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "4 Theta terms in R3(T3)", 2)
 
     @tensoropt IntermediateTheta[Q,Z',Z] := ovP[m,e,Q] * (UvoX[e,k,Y'] * (T3_XYZ[X',Y',Z'] * (UvoX[c,m,X'] * UvoX[c,k,Z])))
     @tensoropt Thetavirt[b,d,Z] += 0.5* ovP[l,d,Q] * (UvoX[b,l,Z'] * IntermediateTheta[Q,Z',Z]) #virt8
     @tensoropt Thetaocc[l,j,Z] -= 0.5 * ovP[l,d,Q] * (UvoX[d,j,Z'] * IntermediateTheta[Q,Z',Z]) #occ7
     IntermediateTheta = nothing
-    t1 = print_time(EC,t1,"5 Theta terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "5 Theta terms in R3(T3)", 2)
   end
 
   @tensoropt TaiX[a,i,X] := UvoX[b,j,X] * T2[a,b,i,j]
@@ -2171,22 +2109,22 @@ function calc_triples_residuals(EC::ECInfo, T1, T2, cc3 = false)
   @tensoropt Thetavirt[b,d,Z] += vvP[b,d,Q] * (ovP[l,e,Q] * TStrich[e,l,Z]) #virt4
   @tensoropt Thetaocc[l,j,Z] += ooP[l,j,Q] * (ovP[m,d,Q] * TStrich[d,m,Z]) #occ2
   TStrich = nothing
-  t1 = print_time(EC,t1,"6 Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "6 Theta terms in R3(T3)", 2)
 
   @tensoropt Thetavirt[b,d,Z] -= dfov[l,d] * TaiX[b,l,Z] #virt2
   @tensoropt Thetavirt[b,d,Z] -= ovP[l,d,Q] * (vvP[b,e,Q] * TaiX[e,l,Z]) #virt5
   @tensoropt Thetaocc[l,j,Z] -= ooP[m,j,Q] * (ovP[l,d,Q] * TaiX[d,m,Z]) #occ3
-  t1 = print_time(EC,t1,"7 Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "7 Theta terms in R3(T3)", 2)
   
   @tensoropt Term1[X,Y,Z] := (TaiX[b,l,X] * Thetaocc[l,j,Z] - Thetavirt[b,d,Z] * TaiX[d,j,X]) * UvoX[b,j,Y]
   Thetaocc = nothing
   Thetavirt = nothing
   TaiX = nothing
-  t1 = print_time(EC,t1,"Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "Theta terms in R3(T3)", 2)
 
   @tensoropt R3decomp[X,Y,Z] := Term1[X,Y,Z] + Term1[Y,X,Z] + Term1[X,Z,Y] + Term1[Z,Y,X] + Term1[Z,X,Y] + Term1[Y,Z,X]
   Term1 = nothing
-  t1 = print_time(EC,t1,"Symmetrization of Theta terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "Symmetrization of Theta terms in R3(T3)", 2)
 
 
   @tensor TTilde[a,b,i,j] := 2.0 * T2[a,b,i,j] - T2[b,a,i,j]
@@ -2198,7 +2136,7 @@ function calc_triples_residuals(EC::ECInfo, T1, T2, cc3 = false)
     @tensoropt Term2[X,Y,Z] := T3_XYZ[X',Y,Z] * (UvoX[a,l,X'] * ( (dfoo[l,i] + 0.5 * Intermediate1Term2[l,d,m,e] * TTilde[d,e,i,m]) * UvoX[a,i,X])) #1
     @tensoropt Term2[X,Y,Z] -= T3_XYZ[X',Y,Z] * (UvoX[a,i,X] *( (dfvv[a,d] - 0.5 * Intermediate1Term2[l,d,m,e] * TTilde[a,e,l,m]) * UvoX[d,i,X'])) #2
     Intermediate1Term2 = nothing
-    t1 = print_time(EC,t1,"1 Chi terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "1 Chi terms in R3(T3)", 2)
     @tensoropt Term2[X,Y,Z] += (UvoX[a,i,X] * ((ooP[l,i,P] * vvP[a,d,P]) * UvoX[d,l,X'])) * (T3_XYZ[X',Y',Z] * (UvoX[b,j,Y] * UvoX[b,j,Y'])) #3
     @tensoropt Term2[X,Y,Z] -= 2* (T3_XYZ[X',Y,Z] *((voP[a,i,P] + ovP[m,e,P] * TTilde[a,e,i,m]) * UvoX[a,i,X]) * (ovP[l,d,P] * UvoX[d,l,X'])) #4
     @tensoropt Term2[X,Y,Z] -= T3_XYZ[X,Y',Z'] * (((UvoX[c,k,Z] * UvoX[c,m,Z']) * ooP[m,k,P]) * (UvoX[b,j,Y] * (ooP[l,j,P] * UvoX[b,l,Y']))) #5
@@ -2209,17 +2147,17 @@ function calc_triples_residuals(EC::ECInfo, T1, T2, cc3 = false)
     t1 = print_time(EC,t1,"2 Chi terms in R3(T3)",2)
     @tensoropt Term2[X,Y,Z] += (ooP[l,i,P] * (UvoX[a,i,X] * UvoX[a,l,X'])) * (Intermediate3Term2[X',Y,Z,P] + Intermediate3Term2[X',Z,Y,P]) #7
     Intermediate3Term2 = nothing
-    t1 = print_time(EC,t1,"3 Chi terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "3 Chi terms in R3(T3)", 2)
     @tensoropt Intermediate4Term2[l,d,a,i] := ovP[l,d,P] * (voP[a,i,P] + ovP[m,e,P] * TTilde[a,e,i,m])
     @tensoropt Term2[X,Y,Z] += UvoX[c,k,Z] * ((T3_XYZ[X',Y',Y] * UvoX[c,l,X']) * (UvoX[d,k,Y'] * (UvoX[a,i,X] * Intermediate4Term2[l,d,a,i]))) #8
     @tensoropt Term2[X,Y,Z] += UvoX[b,j,Y] * ((T3_XYZ[X',Y',Z] * UvoX[b,l,X']) * (UvoX[d,j,Y'] * (UvoX[a,i,X] * Intermediate4Term2[l,d,a,i]))) #9
     Intermediate4Term2 = nothing
-    t1 = print_time(EC,t1,"4 Chi terms in R3(T3)",2)
+    t1 = print_time(EC, t1, "4 Chi terms in R3(T3)", 2)
   end
 
   @tensoropt R3decomp[X,Y,Z] += Term2[X,Y,Z] + Term2[Y,X,Z] + Term2[Z,Y,X]
   Term2 = nothing
-  t1 = print_time(EC,t1,"Symmetrization of Chi terms in R3(T3)",2)
+  t1 = print_time(EC, t1, "Symmetrization of Chi terms in R3(T3)", 2)
 
   #display(R3decomp)
 
@@ -2228,7 +2166,7 @@ function calc_triples_residuals(EC::ECInfo, T1, T2, cc3 = false)
   close(ooPfile)
   close(vvPfile)
 
-  save(EC,"R3_decomp",R3decomp)
+  save!(EC, "R_XXX", R3decomp)
   
 end
 

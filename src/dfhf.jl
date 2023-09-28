@@ -1,5 +1,6 @@
 module DFHF
 using LinearAlgebra, TensorOperations, Printf
+using ..ElemCo.Utils
 using ..ElemCo.ECInfos
 using ..ElemCo.ECInts
 using ..ElemCo.MSystem
@@ -12,14 +13,17 @@ using ..ElemCo.TensorTools
 export dfhf, generate_integrals 
 
 """
-    dfhf(EC::ECInfo; direct=false, guess=:SAD)
+    dfhf(EC::ECInfo)
 
   Perform closed-shell DF-HF calculation.
 """
-function dfhf(EC::ECInfo; direct=false, guess=:SAD)
-  println("DF-HF")
+function dfhf(EC::ECInfo)
+  print_info("DF-HF")
+  setup_space_ms!(EC)
   diis = Diis(EC)
   thren = sqrt(EC.options.scf.thr)*0.1
+  direct = EC.options.scf.direct
+  guess = EC.options.scf.guess
   Enuc = generate_AO_DF_integrals(EC, "jkfit"; save3idx=!direct)
   if direct
     bao = generate_basis(EC.ms, "ao")
@@ -62,8 +66,10 @@ function dfhf(EC::ECInfo; direct=false, guess=:SAD)
     # display(ϵ)
   end
   println("DF-HF energy: ", EHF)
-  delete_temporary_files(EC)
-  return ϵ, cMO
+  draw_endline()
+  delete_temporary_files!(EC)
+  save!(EC, EC.options.wf.orb, cMO, description="DFHF orbitals")
+  return EHF
 end
 
 end #module
