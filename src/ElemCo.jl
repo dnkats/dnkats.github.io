@@ -56,8 +56,27 @@ using .DfDump
 
 
 export ECdriver 
+export @mainname
 export @loadfile, @savefile, @copyfile
 export @ECinit, @tryECinit, @opt, @run, @dfhf, @dfints, @cc, @svdcc
+
+"""
+    @mainname(file)
+
+  Return the main name of a file, i.e. the part before the last dot
+  and the extension.
+
+  # Examples
+```julia
+julia> @mainname("~/test.xyz")
+("test", "xyz")
+```  
+"""
+macro mainname(file)
+  return quote
+    mainname($(esc(file)))
+  end
+end
 
 """
     @loadfile(filename)
@@ -118,7 +137,7 @@ end
 
   # Examples
 ```julia
-geometry="\nHe 0.0 0.0 0.0"
+geometry="He 0.0 0.0 0.0"
 basis = Dict("ao"=>"cc-pVDZ", "jkfit"=>"cc-pvtz-jkfit", "mp2fit"=>"cc-pvdz-rifit")
 @ECinit
 # output
@@ -130,11 +149,14 @@ macro ECinit()
   return quote
     $(esc(:EC)) = ECInfo()
     try
+      println("Geometry: ",$(esc(:geometry)))
+      println("Basis: ",$(esc(:basis)))
       $(esc(:EC)).ms = MSys($(esc(:geometry)),$(esc(:basis)))
     catch err
       isa(err, UndefVarError) || rethrow(err)
     end
     try
+      println("FCIDump: ",$(esc(:fcidump)))
       $(esc(:EC)).fd = read_fcidump($(esc(:fcidump)))
     catch err
       isa(err, UndefVarError) || rethrow(err)
@@ -261,6 +283,9 @@ macro cc(method, kwargs...)
   else
     return quote
       $(esc(:@tryECinit))
+      if !fd_exists($(esc(:EC)).fd)
+        $(esc(:@dfints))
+      end
       ECdriver($(esc(:EC)), $(esc(strmethod)); fcidump="", $(ekwa...))
     end
   end
