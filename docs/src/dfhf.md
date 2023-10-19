@@ -1,5 +1,9 @@
 # Density-fitted Hartree-Fock
 
+```@meta
+CurrentModule = ElemCo.DFHF
+```
+
 The density-fitted Hartree-Fock (DF-HF) method is a method for computing
 the Hartree-Fock energy using density fitting. The DF-HF method is
 implemented in ElemCo.jl using the `@dfhf` macro. Here's an example of
@@ -26,7 +30,14 @@ This code defines a water molecule, computes DF-HF using the cc-pVDZ
 basis set, and calculates the DF-HF energy.
 
 ## Exported functions and types
-  
-```@docs
-ElemCo.dfhf
-``` 
+
+```@autodocs
+Modules = [DFHF]
+Private = false
+```
+
+## Internal functions
+```@autodocs
+Modules = [DFHF]
+Public = false
+```  

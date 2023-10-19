@@ -1,5 +1,13 @@
 # Molecular system
 
+```@meta
+CurrentModule = ElemCo.MSystem
+```
+
+```@docs
+MSystem
+```
+
 The molecular system is the core of the simulation. It contains all the
 information about the molecule, including the geometry and basis sets
 The molecular system is defined using the `MSys` function:
@@ -51,27 +59,16 @@ The basis set dictionary contains three keys: `ao`, `jkfit`, and
 `jkfit` key contains the basis set for the density fitting integrals in the Hartree-Fock calculations,
 and the `mp2fit` key contains the fitting basis set for the correlated calculations.
 
-```@docs
-ElemCo.MSystem
-```
-
 ## Exported functions and types
-
-```@docs
-ElemCo.MSys
-ElemCo.ms_exists
-ElemCo.Basis
-ElemCo.ACenter
-ElemCo.genxyz
-ElemCo.nuclear_repulsion
-ElemCo.bond_length
-ElemCo.electron_distribution
-ElemCo.guess_nelec
-ElemCo.guess_norb
-ElemCo.guess_ncore
-ElemCo.generate_basis
+```@autodocs
+Modules = [MSystem]
+Private = false
+Order = [:type, :function]
 ```
+
 ## Internal functions and types
-```@docs
-ElemCo.MSystem.ncoreorbs
+```@autodocs
+Modules = [MSystem]
+Public = false
+Order = [:type, :function]
 ```

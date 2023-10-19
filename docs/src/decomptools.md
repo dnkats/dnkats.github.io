@@ -1,20 +1,26 @@
-# MCSCF program
+# Tensor-decomposition tools
 
 ```@meta
-CurrentModule = ElemCo.DFMCSCF
+CurrentModule = ElemCo.DecompTools
+```
+
+```@docs
+DecompTools
 ```
 
 ## Exported functions
 
 ```@autodocs
-Modules = [DFMCSCF]
+Modules = [DecompTools]
 Private = false
 Order = [:function]
 ```
 
 ## Internal functions
 ```@autodocs
-Modules = [DFMCSCF]
+Modules = [DecompTools]
 Public = false
 Order = [:function]
 ```
+
+

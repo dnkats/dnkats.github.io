@@ -1,14 +1,24 @@
 # Orbital tools
 
-## Exported functions
+```@meta
+CurrentModule = ElemCo.OrbTools
+```
 
 ```@docs
-ElemCo.OrbTools.guess_orb
+OrbTools
+```
+
+## Exported functions
+
+```@autodocs
+Modules = [OrbTools]
+Private = false
+Order = [:function]
 ```
 
 ## Internal functions
-
-```@docs
-ElemCo.OrbTools.guess_hcore
-ElemCo.OrbTools.guess_sad
+```@autodocs
+Modules = [OrbTools]
+Public = false
+Order = [:function]
 ```

@@ -1,29 +1,32 @@
 # Calculations
 
-## Macros
+```@meta
+CurrentModule = ElemCo
+```
 
 ```@docs
-@ECinit
-@tryECinit
-@opt
-@dfhf
-@dfints
-@cc
-@svdcc
-@run
-@loadfile
-@savefile
-@copyfile
+ElemCo
+```
+
+## Macros
+
+```@autodocs
+Modules = [ElemCo]
+Private = false
+Order = [:macro]
 ```
 
 ## Exported functions
 
-```@docs
-ECdriver
+```@autodocs
+Modules = [ElemCo]
+Private = false
+Order = [:function]
 ```
 
-## Some internal functions
-```@docs
-ElemCo.is_closed_shell
-ElemCo.calc_HF_energy
+## Internal functions
+```@autodocs
+Modules = [ElemCo]
+Public = false
+Order = [:function]
 ```

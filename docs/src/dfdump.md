@@ -1,17 +1,24 @@
 # Generation of integrals using density fitting
 
+```@meta
+CurrentModule = ElemCo.DfDump
+```
+
 ```@docs
-ElemCo.DfDump
+DfDump
 ```
 
 ## Exported functions
 
-```@docs
-ElemCo.dfdump
+```@autodocs
+Modules = [DfDump]
+Private = false
+Order = [:function]
 ```
 
 ## Internal functions
-
-```@docs
-ElemCo.DfDump.generate_integrals
+```@autodocs
+Modules = [DfDump]
+Public = false
+Order = [:function]
 ```
