@@ -3,7 +3,32 @@ module Utils
 using Printf
 using ..ElemCo.AbstractEC
 
-export print_time, draw_line, draw_wiggly_line, print_info, draw_endline, kwarg_provided_in_macro
+export mainname, print_time, draw_line, draw_wiggly_line, print_info, draw_endline, kwarg_provided_in_macro
+
+"""
+    mainname(file::String)
+
+  Return the main name of a file, i.e. the part before the last dot
+  and the extension.
+
+  Examples:
+  ```
+  julia> mainname("~/test.xyz")
+  ("test", "xyz")
+
+  julia> mainname("test")
+  ("test", "")
+  ```
+"""
+function mainname(file::String)
+  ffile = basename(file)
+  afile = split(ffile,'.')
+  if length(afile) == 1
+    return afile[1], ""
+  else
+    return join(afile[1:end-1], '.'), afile[end]
+  end
+end
 
 """ 
     print_time(EC::AbstractECInfo, t1, info::AbstractString, verb::Int)
@@ -14,6 +39,7 @@ function print_time(EC::AbstractECInfo, t1, info::AbstractString, verb::Int)
   t2 = time_ns()
   if verb < EC.verbosity
     @printf "Time for %s:\t %8.2f \n" info (t2-t1)/10^9
+    flush(stdout)
   end
   return t2
 end
@@ -52,6 +78,7 @@ function print_info(info::AbstractString, additional_info::AbstractString="")
     println(additional_info)
     draw_thin_line()
   end
+  flush(stdout)
 end
 
 """
@@ -61,6 +88,7 @@ end
 """
 function draw_endline(n=63)
   println(repeat("═", n))
+  flush(stdout)
 end
 
 """

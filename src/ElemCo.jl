@@ -56,13 +56,32 @@ using .DfDump
 
 
 export ECdriver 
+export @mainname
 export @loadfile, @savefile, @copyfile
 export @ECinit, @tryECinit, @opt, @run, @dfhf, @dfints, @cc, @svdcc
 
 """
+    @mainname(file)
+
+  Return the main name of a file, i.e. the part before the last dot
+  and the extension.
+
+  # Examples
+```julia
+julia> @mainname("~/test.xyz")
+("test", "xyz")
+```  
+"""
+macro mainname(file)
+  return quote
+    mainname($(esc(file)))
+  end
+end
+
+"""
     @loadfile(filename)
 
-  Load file `filename` in `EC.scr` directory.
+  Read file `filename` from `EC.scr` directory.
 
   # Example
 ```julia
@@ -118,7 +137,7 @@ end
 
   # Examples
 ```julia
-geometry="\nHe 0.0 0.0 0.0"
+geometry="He 0.0 0.0 0.0"
 basis = Dict("ao"=>"cc-pVDZ", "jkfit"=>"cc-pvtz-jkfit", "mp2fit"=>"cc-pvdz-rifit")
 @ECinit
 # output
@@ -130,11 +149,14 @@ macro ECinit()
   return quote
     $(esc(:EC)) = ECInfo()
     try
+      println("Geometry: ",$(esc(:geometry)))
+      println("Basis: ",$(esc(:basis)))
       $(esc(:EC)).ms = MSys($(esc(:geometry)),$(esc(:basis)))
     catch err
       isa(err, UndefVarError) || rethrow(err)
     end
     try
+      println("FCIDump: ",$(esc(:fcidump)))
       $(esc(:EC)).fd = read_fcidump($(esc(:fcidump)))
     catch err
       isa(err, UndefVarError) || rethrow(err)
@@ -168,7 +190,7 @@ end
     
   The first argument `what` is the name of the option (e.g., `scf`, `cc`, `cholesky`).
   The keyword arguments are the options to be set (e.g., `thr=1.e-14`, `maxit=10`).
-  The current state of the options can be stored in a variable, e.g., `opt_cc = EC.options`. 
+  The current state of the options can be stored in a variable, e.g., `opt_cc = @opt cc`. 
   If `EC` is not already initialized, it will be done. 
 
 
@@ -203,7 +225,7 @@ end
 """ 
     @dfhf()
 
-  Run DFHF calculation. The orbitals are stored to `ScfOptions.save`.
+  Run DFHF calculation. The orbitals are stored to `WfOptions.orb`.
 """
 macro dfhf()
   return quote
@@ -216,8 +238,7 @@ end
     @dfints()
 
   Generate 2 and 4-idx MO integrals using density fitting.
-  The MO coefficients are read from `IntOptions.orbs`,
-  and if empty string - from `ScfOptions.save`.
+  The MO coefficients are read from `WfOptions.orbs`.
 """
 macro dfints()
   return quote
@@ -261,6 +282,9 @@ macro cc(method, kwargs...)
   else
     return quote
       $(esc(:@tryECinit))
+      if !fd_exists($(esc(:EC)).fd)
+        $(esc(:@dfints))
+      end
       ECdriver($(esc(:EC)), $(esc(strmethod)); fcidump="", $(ekwa...))
     end
   end

@@ -7,7 +7,7 @@ The integrals are obtained from a FCIDUMP file or calculated using the `Gaussian
 
 Requirements: julia (>1.8)
 
-Packages: LinearAlgebra, NPZ, Mmap, TensorOperations, Printf, Parameters, IterativeSolvers, GaussianBasis, DocStringExtensions, MKL(optional)
+Packages: LinearAlgebra, NPZ, Mmap, TensorOperations, Printf, IterativeSolvers, GaussianBasis, DocStringExtensions, MKL(optional)
 
 ## Usage
 For a development version of `ElemCo.jl`, clone the repository and create a symbolic link in the working directory to the `ElemCo.jl-devel` directory:
@@ -46,11 +46,10 @@ basis = Dict("ao"=>"cc-pVDZ",
              "jkfit"=>"cc-pvtz-jkfit",
              "mp2fit"=>"cc-pvdz-rifit")
 @dfhf
-@dfints
 @cc dcsd
 ```
-The `@dfhf` macro calculates the density-fitted Hartree-Fock energy 
-and the `@dfints` macro calculates the density-fitted two-electron integrals which are then employed in the DCSD calculation.
+The `@dfhf` macro calculates the density-fitted Hartree-Fock energy and orbitals 
+and then DCSD calculation is performed using density-fitted integrals.
 
 Further example scripts are provided in the `examples` directory.
 
