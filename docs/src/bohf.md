@@ -1,12 +1,18 @@
 # Bi-orthogonal Hartree-Fock 
 
+```@meta
+CurrentModule = ElemCo.BOHF
+```
+
 ```@docs
-ElemCo.BOHF
+BOHF
 ```
 
 ## Exported functions
 
-```@docs
-ElemCo.BOHF.bohf
-ElemCo.BOHF.bouhf
+```@autodocs
+Modules = [BOHF]
+Private = false
+Order = [:function]
 ```
+

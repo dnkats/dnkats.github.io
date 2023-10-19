@@ -1,9 +1,24 @@
 # Fock builders
 
+```@meta
+CurrentModule = ElemCo.FockFactory
+```
+
 ```@docs
-ElemCo.FockFactory
-ElemCo.FockFactory.gen_fock
-ElemCo.FockFactory.gen_ufock
-ElemCo.FockFactory.gen_dffock
-ElemCo.FockFactory.gen_density_matrix
+FockFactory
+```
+
+## Exported functions
+
+```@autodocs
+Modules = [FockFactory]
+Private = false
+Order = [:function]
+```
+
+## Internal functions
+```@autodocs
+Modules = [FockFactory]
+Public = false
+Order = [:function]
 ```

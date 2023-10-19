@@ -1,6 +1,24 @@
 # Utils
 
+```@meta
+CurrentModule = ElemCo.Utils
+```
+
 ```@docs
-ElemCo.Utils
-ElemCo.Utils.print_time
+Utils
+```
+
+## Exported functions
+
+```@autodocs
+Modules = [Utils]
+Private = false
+Order = [:function]
+```
+
+## Internal functions
+```@autodocs
+Modules = [Utils]
+Public = false
+Order = [:function]
 ```

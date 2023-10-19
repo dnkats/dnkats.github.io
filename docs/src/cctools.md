@@ -1,20 +1,26 @@
-# MCSCF program
+# Coupled-cluster tools
 
 ```@meta
-CurrentModule = ElemCo.DFMCSCF
+CurrentModule = ElemCo.CCTools
+```
+
+```@docs
+CCTools
 ```
 
 ## Exported functions
 
 ```@autodocs
-Modules = [DFMCSCF]
+Modules = [CCTools]
 Private = false
 Order = [:function]
 ```
 
 ## Internal functions
 ```@autodocs
-Modules = [DFMCSCF]
+Modules = [CCTools]
 Public = false
 Order = [:function]
 ```
+
+

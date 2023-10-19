@@ -1,11 +1,30 @@
 # ElemCo.jl methods
 
+```@meta
+CurrentModule = ElemCo.ECMethods
+```
+
 ```@docs
-ElemCo.ECMethods
+ECMethods
 ```
 
 ## Main structure
 
 ```@docs
-ElemCo.ECMethod
+ECMethod
+```
+
+## Exported functions
+
+```@autodocs
+Modules = [ECMethods]
+Private = false
+Order = [:function]
+```
+
+## Internal functions
+```@autodocs
+Modules = [ECMethods]
+Public = false
+Order = [:function]
 ```

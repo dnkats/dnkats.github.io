@@ -1,17 +1,30 @@
 # DIIS solver
 
+```@meta
+CurrentModule = ElemCo.DIIS
+```
+
 ```@docs  
-ElemCo.DIIS
+DIIS
 ```
 
 ## Main structure
 
 ```@docs
-ElemCo.DIIS.Diis
+Diis
 ```
 
 ## Exported functions
 
-```@docs
-ElemCo.DIIS.perform
+```@autodocs
+Modules = [DIIS]
+Private = false
+Order = [:function]
+```
+
+## Internal functions
+```@autodocs
+Modules = [DIIS]
+Public = false
+Order = [:function]
 ```

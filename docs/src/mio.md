@@ -1,15 +1,24 @@
 # I/O routines
 
-```@docs
-ElemCo.MIO
+```@meta
+CurrentModule = ElemCo.MIO
 ```
 
-## I/O functions
-
 ```@docs
-ElemCo.MIO.miosave
-ElemCo.MIO.mioload
-ElemCo.MIO.miommap
-ElemCo.MIO.mionewmmap
-ElemCo.MIO.mioclosemmap
+MIO
+```
+
+## Exported functions
+
+```@autodocs
+Modules = [MIO]
+Private = false
+Order = [:function]
+```
+
+## Internal functions
+```@autodocs
+Modules = [MIO]
+Public = false
+Order = [:function]
 ```
